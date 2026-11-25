@@ -27,7 +27,7 @@ import _common as c  # noqa: E402
 
 
 def main():
-    ap =argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("project")
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--quality", choices=["medium", "good", "source"], default="good")
