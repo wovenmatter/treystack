@@ -423,7 +423,8 @@ def summarize_spec(spec):
         pieces = spec.map_range(n, float(z["from"]), float(z["to"]))
         if not pieces:
             L.append("   WARNING: zoom %d falls entirely in removed footage" % (i + 1))
-        elif spec.look != "plain" and sum(b - a for _, a, b in spec.keep) - pieces[-1][1] < 1.2:
+        # 1.19, not 1.2: plan-zooms ends a zoom exactly 1.2 s before the end, rounded to 0.01 s
+        elif spec.look != "plain" and sum(b - a for _, a, b in spec.keep) - pieces[-1][1] < 1.19:
             L.append("   WARNING: zoom %d is still zoomed in when the video ends (zooming out takes about"
                      " 1.2 s): end it earlier or keep more footage after it" % (i + 1))
     for n in spec.sources:

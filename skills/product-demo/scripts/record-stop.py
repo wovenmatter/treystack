@@ -171,7 +171,8 @@ def main(argv):
     if info and (st.get("mic") or st.get("systemAudio")):
         if info["audio_tracks"] == 0:
             warnings.append("audio was requested but the take has no audio track")
-        elif c.max_volume_db(new_video, 60) == float("-inf"):
+        # ffmpeg reports digital silence as about -91 dB (16-bit) or -inf, never as a missing track
+        elif (c.max_volume_db(new_video, 60) or 0) < -80:
             warnings.append("the take's audio is digital silence. " + (
                 c.MIC_PERMISSION_MSG if st.get("mic") else "Nothing was playing."))
     tel = telemetry_stats(new_cursor) if new_cursor else None
