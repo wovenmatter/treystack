@@ -11,19 +11,11 @@ usage:
   edit.py build edit.json [-o project.openscreen]
         Compile to an OpenScreen project (schemaVersion-4 document; default edit.openscreen
         next to edit.json).
-  edit.py summary FILE
-        Readable summary of an edit file (timeline, output length, zoom legibility verdicts,
-        warnings) or of any .openscreen project.
-  edit.py schema
-        Print an example edit file.
+  edit.py summary edit.json
+        Timeline, output length, zoom legibility verdicts and warnings.
 
 Times are SECONDS IN THE SOURCE TAKE; boxes and points are SOURCE PIXELS (of the take video,
 which for a window capture includes the window's title bar).
-
-Why the document format: OpenScreen also loads the simple v2 project that `record` writes, but
-its loader drops zoom customScale and hideCursor and cannot carry captions or several clips.
-The schemaVersion-4 document (the draft OpenScreen's own v2 migration produces) is upgraded
-and validated by the app on load and keeps all of them.
 """
 
 import argparse
@@ -79,7 +71,7 @@ def check_fields(raw):
     for sect in ("zooms", "speed", "blur", "text"):
         for i, item in enumerate(raw.get(sect) or []):
             if not isinstance(item, dict):
-                die('"%s" item %d must be an object like %s' % (sect, i + 1, json.dumps(EXAMPLE.get(sect, [{}])[0])))
+                die('"%s" item %d must be an object (see references/edit-format.md)' % (sect, i + 1))
             for k in item:
                 if k not in FIELDS[sect]:
                     bad('"%s" item %d' % (sect, i + 1), k, FIELDS[sect])
@@ -88,19 +80,6 @@ def check_fields(raw):
                        if k not in item]
             if missing:
                 die('"%s" item %d is missing %s' % (sect, i + 1, ", ".join('"%s"' % m for m in missing)))
-
-
-EXAMPLE = {
-    "sources": {"main": "takes/take-1/recording-1700000000000.mp4"},
-    "look": "polished",
-    "aspect": "16:9",
-    "cut": [[0, 1.8], [17.0, 23.0]],
-    "speed": [{"from": 30, "to": 35, "x": 3}],
-    "zooms": [{"from": 3, "to": 7, "center": [898, 478], "width": 533}],
-    "blur": [{"from": 0, "to": 50, "box": [1096, 670, 386, 40]}],
-    "captions": {"words": "words.json", "style": {"fontSize": 56}},
-    "style": {"padding": 10},
-}
 
 
 def die(msg):
@@ -188,6 +167,7 @@ class Spec:
         self.style = dict(LOOKS[self.look])
         self.style.update(r.get("style") or {})
         self.keep = self._keep_ranges()
+        self._check_ranges()
 
     def src(self, item):
         name = item.get("source", self.default) if isinstance(item, dict) else self.default
@@ -202,6 +182,9 @@ class Spec:
         out = []
         if r.get("keep"):
             for k in r["keep"]:
+                if (not isinstance(k, list) or len(k) not in (2, 3)
+                        or not all(isinstance(v, (int, float)) for v in k[-2:])):
+                    die('"keep" items are [from, to] or ["source", from, to], not %s' % json.dumps(k))
                 name, a, b = k if len(k) == 3 else (self.default, k[0], k[1])
                 if name not in self.sources:
                     die("keep: unknown source %r" % name)
@@ -214,6 +197,11 @@ class Spec:
             name = self.default
             dur = self.sources[name]["duration"]
             t = 0.0
+            for k in r.get("cut") or []:
+                if not isinstance(k, list) or len(k) != 2 or not float(k[0]) < float(k[1]):
+                    die('"cut" items are [from, to] with from before to, not %s' % json.dumps(k))
+                if float(k[0]) >= dur:
+                    die('cut %s starts after the end of the take (%.3f s)' % (json.dumps(k), dur))
             for a, b in sorted((float(a), float(b)) for a, b in (r.get("cut") or [])):
                 a, b = max(0.0, a), min(dur, b)
                 if a > t:
@@ -225,6 +213,33 @@ class Spec:
             if not (0 <= a < b <= self.sources[name]["duration"] + 0.05):
                 die("range %s [%.3f, %.3f] is outside 0..%.3f or empty" % (name, a, b, self.sources[name]["duration"]))
         return [(n, a, min(b, self.sources[n]["duration"])) for n, a, b in out]
+
+    def _check_ranges(self):
+        r, seen = self.raw, []
+        for sp in r.get("speed") or []:
+            n, a, b, x = self.src(sp), float(sp["from"]), float(sp["to"]), float(sp["x"])
+            if not 0.25 <= x <= 16:
+                die('speed "x" must be between 0.25 and 16 (OpenScreen\'s range), not %g' % x)
+            if not a < b:
+                die('speed %g-%g: "from" must be before "to"' % (a, b))
+            if any(m == n and a < hi and lo < b for m, lo, hi in seen):
+                die("speed regions overlap at %g-%g; give each stretch one speed" % (a, b))
+            seen.append((n, a, b))
+        for n, box in (r.get("crop") or {}).items():
+            if n not in self.sources:
+                die('crop: unknown source %r (sources: %s)' % (n, ", ".join(self.sources)))
+            S = self.sources[n]
+            if not (isinstance(box, list) and len(box) == 4 and box[0] >= 0 and box[1] >= 0 and box[2] > 0
+                    and box[3] > 0 and box[0] + box[2] <= S["width"] and box[1] + box[3] <= S["height"]):
+                die('crop %r must be [x, y, w, h] inside the %dx%d take, not %s'
+                    % (n, S["width"], S["height"], json.dumps(box)))
+        if r.get("captions"):
+            self.src(r["captions"])
+
+    def crop_box(self, name):
+        """(x, y, w, h) in capture px of what the frame shows unzoomed: the crop, else the whole take."""
+        S = self.sources[name]
+        return tuple((self.raw.get("crop") or {}).get(name) or (0, 0, S["width"], S["height"]))
 
     def clips(self):
         """[(name, srcA, srcB, timelineA)] on the raw (pre-speed) timeline."""
@@ -251,17 +266,15 @@ class Spec:
                 total -= (hi - lo) - (hi - lo) / x
         return total
 
-    def view_width(self, name):
-        """Width in capture px of what the frame shows unzoomed (the crop if any)."""
-        crop = (self.raw.get("crop") or {}).get(name)
-        return float(crop[2]) if crop else float(self.sources[name]["width"])
-
-    def view_height(self, name):
-        crop = (self.raw.get("crop") or {}).get(name)
-        return float(crop[3]) if crop else float(self.sources[name]["height"])
+    def view_size(self, name):
+        """(width, height) in capture px of what the frame shows unzoomed (the crop if any)."""
+        _, _, w, h = self.crop_box(name)
+        return float(w), float(h)
 
     def cap(self, name, k=1):
-        return c.max_zoom(self.view_width(name) * k, self.view_height(name) * k, float(self.style["padding"]))
+        """Deepest zoom OpenScreen renders for this source, from a k-times upscaled copy."""
+        w, h = self.view_size(name)
+        return c.max_zoom(w * k, h * k, float(self.style["padding"]))
 
     def zooms_on(self):
         return bool(self.raw.get("zooms")) and (self.look != "plain" or bool(self.raw.get("allow_zooms_in_plain")))
@@ -269,23 +282,27 @@ class Spec:
     def upscale(self, name):
         """2 when this source's zooms render from a 2x upscaled working copy (they ask deeper than
         OpenScreen's cap for the capture itself), else 1. Plain look and zoom-free edits pay nothing."""
-        if not self.zooms_on() or self.aspect != "16:9" or c.upscale_factor(self.sources[name]["width"]) == 1:
+        k = c.upscale_factor(self.sources[name]["width"])
+        if k == 1 or not self.zooms_on() or self.aspect != "16:9":
             return 1
         cap = self.cap(name)
-        need = any(self.zoom_scale(z) > cap + 0.01 for z in self.raw["zooms"] if self.src(z) == name)
-        return c.upscale_factor(self.sources[name]["width"]) if need else 1
+        return k if any(self.zoom_scale(z) > cap + 0.01 for z in self.raw["zooms"] if self.src(z) == name) else 1
 
     def max_zoom(self, name):
         """Deepest zoom that will really render for this source (after any upscaling)."""
         return self.cap(name, self.upscale(name))
 
     def zoom_scale(self, z):
-        vw = self.view_width(self.src(z))
+        vw = self.view_size(self.src(z))[0]
         scale = float(z["scale"]) if "scale" in z else (vw / float(z["width"]) if "width" in z else 2.2)
         return max(1.0, min(5.0, scale))
 
 
 def build_document(spec):
+    """The OpenScreen project as a schemaVersion-4 document (the draft OpenScreen's own v2
+    migration produces; the app upgrades and validates it on load). The simple v2 project that
+    `record` writes loses zoom customScale and hideCursor and cannot carry captions or several
+    clips."""
     now = "2026-01-01T00:00:00.000Z"
     names = list(spec.sources)
     aid = {n: "asset_%d" % (i + 1) for i, n in enumerate(names)}
@@ -313,18 +330,19 @@ def build_document(spec):
         clips.append(cl)
 
     zooms = []
-    if spec.raw.get("zooms") and spec.look == "plain" and not spec.raw.get("allow_zooms_in_plain"):
+    if spec.raw.get("zooms") and not spec.zooms_on():
         sys.stderr.write("note: look=plain ignores %d zoom(s)\n" % len(spec.raw["zooms"]))
     else:
         for i, z in enumerate(spec.raw.get("zooms") or []):
             n = spec.src(z)
-            S = spec.sources[n]
-            cx, cy = z.get("center", [S["width"] / 2, S["height"] / 2])
+            # OpenScreen reads a zoom's focus in the CROPPED footage, like annotations below
+            ox, oy, fw, fh = spec.crop_box(n)
+            cx, cy = z.get("center", [ox + fw / 2.0, oy + fh / 2.0])
             scale = spec.zoom_scale(z)
             depth = min(DEPTH_SCALES, key=lambda d: abs(DEPTH_SCALES[d] - scale))
             for j, (lo, hi) in enumerate(spec.map_range(n, float(z["from"]), float(z["to"]))):
                 r = {"id": "zoom-%d-%d" % (i + 1, j + 1), "startMs": ms(lo), "endMs": ms(hi), "depth": depth,
-                     "focus": {"cx": min(1, max(0, cx / S["width"])), "cy": min(1, max(0, cy / S["height"]))},
+                     "focus": {"cx": min(1, max(0, (cx - ox) / fw)), "cy": min(1, max(0, (cy - oy) / fh))},
                      "focusMode": "auto" if z.get("follow") else "manual", "source": "manual"}
                 if abs(DEPTH_SCALES[depth] - scale) > 1e-6:
                     r["customScale"] = round(scale, 2)
@@ -338,7 +356,7 @@ def build_document(spec):
         S = spec.sources[n]
         x, y, w, h = bl["box"]
         # OpenScreen places annotations in % of the CROPPED footage (verified on a real take)
-        ox, oy, fw, fh = crops.get(n, (0, 0, S["width"], S["height"]))
+        ox, oy, fw, fh = spec.crop_box(n)
         x, y = x - ox, y - oy
         for j, (lo, hi) in enumerate(spec.map_range(n, float(bl.get("from", 0)), float(bl.get("to", S["duration"])))):
             annotations.append({
@@ -377,7 +395,7 @@ def build_document(spec):
     transcripts = []
     cap = spec.raw.get("captions")
     if cap:
-        n = cap.get("source", spec.default)
+        n = spec.src(cap)
         tr = {"assetId": aid[n], "language": cap.get("language", "en"), "segments": [], "words": []}
         seg, seg_i = None, 0
         for k, w in enumerate(load_words(spec.dir, cap.get("words"))):
@@ -409,7 +427,7 @@ def summarize_spec(spec):
     L = ["Edit file: %s" % spec.path]
     for n, s in spec.sources.items():
         L.append("  source %-8s %dx%d %.1f fps %s  %s" % (n, s["width"], s["height"], s["fps"], fmt(s["duration"]), s["path"]))
-        cw, ch = (spec.raw.get("crop") or {}).get(n, (0, 0, s["width"], s["height"]))[2:]
+        cw, ch = spec.view_size(n)
         if abs(cw / float(ch) - 16 / 9.0) > 0.02 and spec.aspect == "16:9":
             L.append("   note: %s%s is %.3f:1, not 16:9; plain look will show bars (use \"crop\" or style.fill)"
                      % (n, " (cropped)" if n in (spec.raw.get("crop") or {}) else "", cw / float(ch)))
@@ -427,11 +445,13 @@ def summarize_spec(spec):
     capped = set()
     for i, z in enumerate(spec.raw.get("zooms") or []):
         n = spec.src(z)
-        vw = spec.view_width(n)
+        vw = spec.view_size(n)[0]
         asked = spec.zoom_scale(z)
         sc = min(asked, spec.max_zoom(n)) if spec.aspect == "16:9" else asked
         frac = 1.0 / sc
         verdict = "phone-legible" if frac <= 0.38 else ("borderline" if frac <= 0.5 else "too wide for phone text")
+        if spec.aspect != "16:9":  # the cap and the upscaled copy are only worked out for 16:9
+            verdict = "depth as asked; what renders in %s is not known, check the draft" % spec.aspect
         L.append("Zoom %d: %s %s - %s  x%.2f%s  shows ~%d of %d px (%.0f%%) -> %s%s%s"
                  % (i + 1, n, fmt(z["from"]), fmt(z["to"]), sc, " (x%.2f asked)" % asked if sc < asked - 0.01 else "",
                     vw / sc, vw, frac * 100, verdict,
@@ -442,7 +462,8 @@ def summarize_spec(spec):
         pieces = spec.map_range(n, float(z["from"]), float(z["to"]))
         if not pieces:
             L.append("   WARNING: zoom %d falls entirely in removed footage" % (i + 1))
-        elif spec.look != "plain" and sum(b - a for _, a, b in spec.keep) - pieces[-1][1] < 1.2:
+        # 1.19, not 1.2: plan-zooms ends a zoom exactly 1.2 s before the end, rounded to 0.01 s
+        elif spec.zooms_on() and sum(b - a for _, a, b in spec.keep) - pieces[-1][1] < 1.19:
             L.append("   WARNING: zoom %d is still zoomed in when the video ends (zooming out takes about"
                      " 1.2 s): end it earlier or keep more footage after it" % (i + 1))
     for n in spec.sources:
@@ -452,7 +473,7 @@ def summarize_spec(spec):
     for n in sorted(capped):
         L.append("   WARNING: OpenScreen enlarges a capture at most 2x, so %s's zooms stop at x%.2f; text"
                  " will be smaller than planned" % (n, spec.max_zoom(n)))
-    if spec.look == "plain" and spec.raw.get("zooms"):
+    if spec.raw.get("zooms") and not spec.zooms_on():
         L.append("NOTE: look=plain drops the zooms")
     if spec.look == "plain":
         for n, S in spec.sources.items():
@@ -466,7 +487,7 @@ def summarize_spec(spec):
             # macOS windows have rounded bottom corners (about 13 px at 1x); edge to edge they show
             # as small black triangles. Inset the crop by that much, keeping 16:9.
             r = 13 * (2 if S["width"] >= c.UPSCALE_BELOW else 1)
-            x, y, w, h = (spec.raw.get("crop") or {}).get(n, (0, 0, S["width"], S["height"]))
+            x, y, w, h = spec.crop_box(n)
             nh = min(h, S["height"] - y - r) if y + h > S["height"] - r else h
             nw = int(round(nh * 16 / 9.0))
             if nw <= w and (y + h > S["height"] - r):
@@ -474,45 +495,12 @@ def summarize_spec(spec):
                          ' them use "crop": {"%s": [%d, %d, %d, %d]} (16:9, trims about %d px)'
                          % (n, n, x + (w - nw) // 2, y, nw, nh, r))
     for i, bl in enumerate(spec.raw.get("blur") or []):
-        L.append("Blur %d: %s %s - %s box %s" % (i + 1, spec.src(bl), fmt(bl.get("from", 0)), fmt(bl.get("to", 0)), bl["box"]))
+        L.append("Blur %d: %s %s - %s box %s" % (i + 1, spec.src(bl), fmt(bl.get("from", 0)),
+                                                 fmt(bl.get("to", spec.sources[spec.src(bl)]["duration"])), bl["box"]))
     if spec.raw.get("captions"):
         L.append("Captions: %d words" % len(words))
     d = spec.output_duration()
     L.append("Output duration: %s (%.2fs)" % (fmt(d), d))
-    return "\n".join(L)
-
-
-def summarize_project(path):
-    d = load_json(path)
-    L = ["Project: %s" % path]
-    if "schemaVersion" in d:
-        ed = d.get("legacyEditor") or {}
-        L.append("Format: document schemaVersion %s" % d["schemaVersion"])
-        for a in d.get("assets", []):
-            v = a.get("video") or {}
-            L.append("  asset %s %sx%s %ss  %s" % (a["id"], v.get("width", "?"), v.get("height", "?"), a.get("durationSec", "?"), a["originalPath"]))
-        for cl in d.get("timeline", {}).get("clips", []):
-            L.append("  clip %s %s src %s-%s at %s-%s%s" % (cl["id"], cl["assetId"], cl.get("sourceStartSec"), cl.get("sourceEndSec"),
-                                                          cl["timelineStartSec"], cl["timelineEndSec"], "  crop" if cl.get("cropRegion") else ""))
-        zooms, anns = d.get("zoomRanges", []), d.get("annotations", [])
-        caps = sum(len(t.get("words", [])) for t in d.get("transcripts", []))
-    else:
-        ed = d.get("editor") or {}
-        L.append("Format: v2 project (as written by record)")
-        L.append("  media %s" % (d.get("media") or {}).get("screenVideoPath"))
-        zooms, anns, caps = ed.get("zoomRegions", []), ed.get("annotationRegions", []), 0
-    for s in ed.get("speedRegions", []):
-        L.append("  speed x%s %.3f-%.3f s" % (s["speed"], s["startMs"] / 1000, s["endMs"] / 1000))
-    for z in zooms:
-        sc = z.get("customScale") or DEPTH_SCALES.get(z.get("depth", 3))
-        L.append("  zoom %.3f-%.3f s x%.2f focus (%.3f, %.3f) %s%s" % (z["startMs"] / 1000, z["endMs"] / 1000, sc, z["focus"]["cx"],
-                                                                     z["focus"]["cy"], z.get("focusMode", "manual"), " hide-cursor" if z.get("hideCursor") else ""))
-    for a in anns:
-        L.append("  %s %.3f-%.3f s" % (a["type"], a["startMs"] / 1000, a["endMs"] / 1000))
-    if caps:
-        L.append("  captions: %d words" % caps)
-    keys = ["aspectRatio", "wallpaper", "padding", "borderRadius", "cursorShow", "cursorSize", "formatFollowCursor"]
-    L.append("  settings: " + ", ".join("%s=%s" % (k, ed[k]) for k in keys if k in ed))
     return "\n".join(L)
 
 
@@ -527,9 +515,8 @@ def main():
     p = sub.add_parser("build", help="edit file -> .openscreen project")
     p.add_argument("edit")
     p.add_argument("-o", "--out")
-    p = sub.add_parser("summary", help="describe an edit file or a .openscreen project")
-    p.add_argument("file")
-    sub.add_parser("schema", help="print an example edit file")
+    p = sub.add_parser("summary", help="describe an edit file")
+    p.add_argument("edit")
     a = ap.parse_args()
 
     if a.cmd == "new":
@@ -562,13 +549,7 @@ def main():
             json.dump(build_document(spec), fh, indent=1)
         print(out)
     elif a.cmd == "summary":
-        try:
-            d = load_json(a.file)
-        except ValueError as e:
-            die("%s is not valid JSON: %s" % (a.file, e))
-        print(summarize_spec(Spec(a.file)) if "sources" in d else summarize_project(a.file))
-    elif a.cmd == "schema":
-        print(json.dumps(EXAMPLE, indent=2))
+        print(summarize_spec(Spec(a.edit)))
     else:
         ap.print_help()
 

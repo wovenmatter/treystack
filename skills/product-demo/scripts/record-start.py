@@ -35,22 +35,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _common as c  # noqa: E402
 
-STATE = ".recording.json"
-
 
 def save_state(demo, st):
-    tmp = os.path.join(demo, STATE + ".tmp")
+    tmp = os.path.join(demo, c.STATE + ".tmp")
     with open(tmp, "w") as f:
         json.dump(st, f, indent=2)
-    os.replace(tmp, os.path.join(demo, STATE))
-
-
-def load_state(demo):
-    try:
-        with open(os.path.join(demo, STATE)) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
+    os.replace(tmp, os.path.join(demo, c.STATE))
 
 
 def parse(argv):
@@ -90,7 +80,7 @@ def main(argv):
     demo = os.path.abspath(os.path.expanduser(a.demo_dir))
     os.makedirs(demo, exist_ok=True)
 
-    st = load_state(demo)
+    st = c.load_state(demo)
     if st and st.get("pid") and c.recorders(app, st.get("marker")):
         c.die("a recording from this folder is already running (pid %s, take %s); stop it with "
               "record-stop.py first" % (st["pid"], st.get("take")), 3, j)
@@ -150,7 +140,7 @@ def main(argv):
              "project": project, "stdoutLog": out_log, "stderrLog": err_log,
              "source": {"window": a.window} if a.window else {"display": a.display or 0},
              "mic": bool(a.mic or a.mic_device), "systemAudio": a.system_audio, "cursor": a.cursor,
-             "duration": a.duration, "launchedAt": c.now(), "startedAt": None, "app": app}
+             "duration": a.duration, "launchedAt": time.time(), "startedAt": None, "app": app}
     save_state(demo, state)
 
     opener = c.launch_capture(app, args, out_log, err_log)
@@ -159,7 +149,7 @@ def main(argv):
     except Exception:  # noqa: BLE001
         pass
     if opener.returncode not in (0, None):
-        os.remove(os.path.join(demo, STATE))
+        os.remove(os.path.join(demo, c.STATE))
         c.die("could not launch Openscreen: " + (opener.stderr.read().strip() or "open failed"), 1, j)
 
     deadline = time.time() + max(a.wait, 3)
@@ -189,7 +179,7 @@ def main(argv):
     if result == "recording":
         src = next((e["message"] for e in evs if e.get("event") == "log"
                     and e.get("message", "").startswith("Recording source:")), "")
-        state.update(status="recording", startedAt=c.now(), sourceName=src.replace("Recording source: ", ""))
+        state.update(status="recording", startedAt=time.time(), sourceName=src.replace("Recording source: ", ""))
         save_state(demo, state)
         res = {"ok": True, "status": "recording", "pid": pid, "take": take, "takeDir": take_dir,
                "source": state["sourceName"]}
@@ -203,7 +193,7 @@ def main(argv):
              "note": "recording ended immediately; run record-stop.py %s to collect it" % demo}, j)
         return 0
     if result in ("failed", "died"):
-        os.remove(os.path.join(demo, STATE))
+        os.remove(os.path.join(demo, c.STATE))
         d = c.done_event(evs) or {}
         msg = c.explain_error(d.get("error") or next(
             (e.get("message") for e in evs if e.get("event") == "error"), "")) if evs else \

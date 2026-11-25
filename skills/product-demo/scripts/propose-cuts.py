@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Propose cuts and speed-ups for a take and (with --write) put them in edit.json.
 
-usage: propose-cuts.py (TAKE_VIDEO | --edit edit.json) [--write] [-o proposal.json]
+usage: propose-cuts.py (TAKE_VIDEO | --edit edit.json) [--write]
                        [--mode auto|idle|narration|silence] [--min-idle 2.0]
                        [--idle-action speed|cut] [--idle-speed 4] [--idle-pixels 25]
                        [--min-silence 0.7] [--pad 0.15] [--silence-db -35]
@@ -12,14 +12,14 @@ usage: propose-cuts.py (TAKE_VIDEO | --edit edit.json) [--write] [-o proposal.js
                   at the very start or end of the take (before the demo begins, the click on
                   Stop) are always cut.
 --mode narration  take with live narration: only pauses that are BOTH silent and idle are cut,
-                  so on-screen action during a pause in speech is kept. Leading/trailing silence
-                  is cut.
+                  so on-screen action during a pause in speech is kept, also before the first
+                  and after the last word.
 --mode silence    cut every pause in speech longer than --min-silence (threshold --silence-db
                   under the peak, --pad s of air kept). Use only when the screen does not matter.
 --mode auto       (default) narration if the take has an audio track with sound, else idle.
 With --edit, the edit file's main source is analysed; --write replaces its "cut" and "speed"
-(a .bak copy is kept). Prints a table of what would be removed; the proposal is a starting
-point: look at the frames and adjust.
+(a .bak copy is kept). Prints the proposal as JSON and a table of what would be removed on
+stderr; it is a starting point: look at the frames and adjust.
 """
 import argparse
 import json
@@ -35,19 +35,14 @@ EDGE = 0.4  # seconds of stillness kept either side of an idle stretch
 
 
 def silences(path, rel_db, min_sil):
-    p = av.run([av.FFMPEG, "-nostdin", "-hide_banner", "-i", path, "-map", "0:a:0",
-                 "-af", "volumedetect", "-f", "null", "-"])
-    m = re.search(r"max_volume: (-?[0-9.]+) dB", p.stderr)
-    peak = float(m.group(1)) if m else 0.0
-    if peak < -60:
-        return None, peak
-    thr = max(-70.0, peak + rel_db)
-    p = av.run([av.FFMPEG, "-nostdin", "-hide_banner", "-i", path, "-map", "0:a:0", "-af",
-                 "silencedetect=n=%.1fdB:d=%.3f" % (thr, min_sil), "-f", "null", "-"])
-    return pair(p.stderr, "silence", av.duration(path)), peak
+    """Pauses in speech, or None when the audio is (digital) silence."""
+    peak = av.max_volume_db(path)
+    if peak is None or peak < -60:
+        return None
+    return av.silence_ranges(path, max(-70.0, peak + rel_db), min_sil)
 
 
-def freezes(path, min_px, min_idle):
+def freezes(path, info, min_px, min_idle):
     """Stretches of at least min_idle s in which no frame changes more than min_px pixels.
 
     Screen captures change locally (a caret, one typed character, a clock), so a mean-difference
@@ -60,7 +55,6 @@ def freezes(path, min_px, min_idle):
                 "fps=10,scale=%d:-2,format=gray,tblend=all_mode=difference,"
                 "lut=y='if(gt(val\\,40)\\,255\\,0)',signalstats,metadata=print:key=lavfi.signalstats.YAVG" % W,
                 "-f", "null", "-"])
-    info = av.media_info(path)
     H = int(round(info["height"] * W / float(info["width"]) / 2) * 2)
     total = info["duration"]
     frames, t = [], None
@@ -85,26 +79,6 @@ def freezes(path, min_px, min_idle):
     return out
 
 
-def pair(stderr, kind, total):
-    st = [float(x) for x in re.findall(r"%s_start: (-?[0-9.]+)" % kind, stderr)]
-    en = [float(x) for x in re.findall(r"%s_end: ([0-9.]+)" % kind, stderr)]
-    out = []
-    for i, s in enumerate(st):
-        out.append((max(0.0, s), en[i] if i < len(en) else total))
-    return out
-
-
-def complement(gaps, total):
-    keep, cur = [], 0.0
-    for s, e in gaps:
-        if s > cur:
-            keep.append((cur, s))
-        cur = max(cur, e)
-    if cur < total:
-        keep.append((cur, total))
-    return keep
-
-
 def intersect(a_list, b_list):
     out = []
     for a0, a1 in a_list:
@@ -120,7 +94,6 @@ def main():
     ap.add_argument("input", nargs="?")
     ap.add_argument("--edit")
     ap.add_argument("--write", action="store_true")
-    ap.add_argument("-o", "--out")
     ap.add_argument("--mode", choices=["auto", "idle", "narration", "silence"], default="auto")
     ap.add_argument("--min-silence", type=float, default=0.7)
     ap.add_argument("--pad", type=float, default=0.15)
@@ -135,20 +108,22 @@ def main():
     if a.edit:
         with open(a.edit) as f:
             edit = json.load(f)
-        if "keep" in edit:
-            av.die("the edit file uses \"keep\"; propose-cuts writes \"cut\"/\"speed\" (single take only)")
+        if "keep" in edit or len(edit["sources"]) > 1:
+            av.die("propose-cuts writes \"cut\"/\"speed\", which need a single take without \"keep\"; "
+                   "for several takes run it on each video and write \"keep\" by hand")
         p = next(iter(edit["sources"].values()))
         a.input = p if os.path.isabs(p) else os.path.join(os.path.dirname(os.path.abspath(a.edit)), p)
     if not a.input:
         ap.error("give TAKE_VIDEO or --edit")
     if a.write and not edit:
         ap.error("--write needs --edit")
-    total = av.duration(a.input)
+    info = av.media_info(a.input)
+    total = info["duration"]
     mode = a.mode
     sil = None
     if mode in ("auto", "narration", "silence"):
-        if av.has_stream(a.input, "audio"):
-            sil, peak = silences(a.input, a.silence_db, a.min_silence)
+        if info["audio_tracks"]:
+            sil = silences(a.input, a.silence_db, a.min_silence)
         if sil is None:
             if mode != "auto":
                 av.die("no audio (or only digital silence) in the take; use --mode idle")
@@ -162,14 +137,13 @@ def main():
         gaps = [(s + a.pad, e - a.pad) for s, e in sil if (e - a.pad) - (s + a.pad) > 0.1]
         gaps = [(0.0 if s <= a.pad + 0.01 else s, total if e >= total - a.pad - 0.01 else e) for s, e in gaps]
         if mode == "narration":
-            fr = [(s, e) for s, e in freezes(a.input, a.idle_pixels, a.min_silence)]
-            gaps = [g for g in gaps if edge(*g)] + [g for g in intersect(gaps, fr) if not edge(*g)]
-            gaps = sorted(set(gaps))
+            fr = freezes(a.input, info, a.idle_pixels, a.min_silence)
+            gaps = sorted(set(intersect(gaps, fr)))
         for s, e in gaps:
             cuts.append([round(s, 3), round(e, 3)])
-            removed.append((s, e, "cut: silence" + ("" if mode == "silence" or edge(s, e) else " + idle")))
+            removed.append((s, e, "cut: silence" + ("" if mode == "silence" else " + idle")))
     else:
-        for s, e in freezes(a.input, a.idle_pixels, a.min_idle):
+        for s, e in freezes(a.input, info, a.idle_pixels, a.min_idle):
             if edge(s, e):
                 s2, e2 = (0.0 if s <= 0.05 else s + EDGE), (total if e >= total - 0.05 else e - EDGE)
                 if e2 - s2 >= 0.3:
@@ -191,9 +165,6 @@ def main():
     sys.stderr.write("mode %s: %.1fs -> %.1fs\n" % (mode, total, outdur))
     for s, e, why in removed:
         sys.stderr.write("  %7.2f - %7.2f  (%5.2fs)  %s\n" % (s, e, e - s, why))
-    if a.out:
-        with open(a.out, "w") as f:
-            json.dump(res, f, indent=1)
     if a.write:
         shutil.copyfile(a.edit, a.edit + ".bak")
         edit["cut"], edit["speed"] = cuts, speed

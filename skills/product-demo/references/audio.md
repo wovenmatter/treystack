@@ -13,7 +13,7 @@ Never a synthetic or text-to-speech voice. Choose one mode per run.
 
 - User's own file: any format ffmpeg reads. If they want a commercial song, they supply the
   file; never download from streaming or video sites.
-- Fetched: `fetch-music.py DEMO [--source mixkit|incompetech] [--mood positive] [--list]
+- Fetched: `fetch-music.py DEMO [--source mixkit|incompetech] [--mood MOOD] [--list]
   [--pick N]` downloads one track to `DEMO/audio/music.mp3` and writes
   `DEMO/audio/music-licence.txt` (title, source page, file URL, licence, required credit, date).
   - Mixkit (default): Mixkit Stock Music Free License, social and commercial use allowed, no
@@ -42,21 +42,17 @@ Never a synthetic or text-to-speech voice. Choose one mode per run.
 
 ## Dub
 
-1. Only after the cut is final: re-cutting afterwards breaks sync.
-2. Warn the user: a muted player window opens, shows 3-2-1, and they talk over the video.
-   The microphone permission is for the app running the shell (terminal or agent app), not
-   Openscreen. If it does not open within 12 s the script exits 4 with the switch to turn on.
-3. `record-dub.py CUT DEMO/audio/voice.wav [--device :default]`. Sync is measured on every
-   run: the capture and every displayed frame are timestamped on the same host clock. The
-   result is `voice.wav` (exactly the cut's length) plus `voice.sync.json`. A recording that is
-   digital silence exits 5; very quiet input warns (wrong device?).
-4. **One-time clap test** (recommended, especially with Bluetooth or wireless mics, which add
-   30–150 ms): clap on the first frame after the countdown, find the clap in voice.wav
-   (`ffmpeg -i voice.wav -af silencedetect=n=-30dB:d=0.05 -f null -`), and pass the difference
-   as `--extra-offset-ms` on later runs (positive = voice later). Remember it in the profile.
-5. `mix-voice.py CUT voice.wav OUT [--music F]`, then captions:
-   `transcribe.py voice.wav DEMO/audio/dub-words.json` and
-   `encode-final.py OUT FINAL.mp4 --captions DEMO/audio/dub-words.json`.
+The steps are in SKILL.md (step 9). Details:
+- The microphone permission is for the app running the shell (terminal or agent app), not
+  Openscreen. If it does not open within 12 s the script exits 4 with the switch to turn on.
+- Sync is measured on every run: the capture and every displayed frame are timestamped on the
+  same host clock. The result is `voice.wav` (exactly the cut's length) plus
+  `voice.sync.json`. A recording that is digital silence exits 5; very quiet input warns
+  (wrong device?). `--device :1` etc. picks another input.
+- **One-time clap test** (recommended, especially with Bluetooth or wireless mics, which add
+  30–150 ms): clap on the first frame after the countdown, find the clap in voice.wav
+  (`ffmpeg -i voice.wav -af silencedetect=n=-30dB:d=0.05 -f null -`), and pass the difference
+  as `--extra-offset-ms` on later runs (positive = voice later). Remember it in the profile.
 
 ## Captions
 

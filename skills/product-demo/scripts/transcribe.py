@@ -5,7 +5,7 @@ usage: transcribe.py INPUT OUT.json [--model base.en] [--models-dir DIR] [--lang
                      [--no-dtw] [--no-snap] [--download]
 
 INPUT     any audio/video file ffmpeg can read (first audio stream is used)
---model   ggml model name: tiny.en | base.en (default) | small.en | medium.en | ...
+--model   ggml model name: tiny.en | base.en (default, or $WHISPER_MODEL) | small.en | ...
 --models-dir  where ggml-<model>.bin lives (default $WHISPER_MODELS_DIR or
               ~/.cache/whisper.cpp)
 --no-dtw  skip whisper.cpp DTW token alignment (on by default: it runs with flash attention
@@ -36,8 +36,15 @@ DTW_LAG = 0.10
 HF = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-%s.bin"
 
 
-def models_dir(arg):
-    return arg or os.environ.get("WHISPER_MODELS_DIR") or os.path.expanduser("~/.cache/whisper.cpp")
+# whisper-cli's DTW alignment presets. ggml files are named large-v3 or base.en-q5_1; the
+# presets are large.v3 and base.en.
+DTW_PRESETS = {"tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en",
+               "large.v1", "large.v2", "large.v3", "large.v3.turbo"}
+
+
+def dtw_preset(model):
+    name = re.sub(r"-q\d\w*$", "", model).replace("large-", "large.").replace("-turbo", ".turbo")
+    return name if name in DTW_PRESETS else None
 
 
 def ensure_model(name, mdir, download):
@@ -57,20 +64,14 @@ def ensure_model(name, mdir, download):
 
 def speech_regions(wav):
     """Non-silent intervals [(start, end)] using a threshold 35 dB under the clip's peak."""
-    p = av.run([av.FFMPEG, "-nostdin", "-hide_banner", "-i", wav, "-af", "volumedetect",
-                 "-f", "null", "-"])
-    m = re.search(r"max_volume: (-?[0-9.]+) dB", p.stderr)
-    thr = max(-60.0, (float(m.group(1)) if m else 0.0) - 35.0)
-    p = av.run([av.FFMPEG, "-nostdin", "-hide_banner", "-i", wav, "-af",
-                 "silencedetect=n=%.1fdB:d=0.20" % thr, "-f", "null", "-"])
+    peak = av.max_volume_db(wav)
+    thr = max(-60.0, (peak if peak is not None else 0.0) - 35.0)
     total = av.duration(wav)
-    starts = [float(x) for x in re.findall(r"silence_start: (-?[0-9.]+)", p.stderr)]
-    ends = [float(x) for x in re.findall(r"silence_end: ([0-9.]+)", p.stderr)]
     regions, cur = [], 0.0
-    for i, s0 in enumerate(starts):
+    for s0, e0 in av.silence_ranges(wav, thr, 0.20):
         if s0 > cur + 0.02:
             regions.append((cur, s0))
-        cur = ends[i] if i < len(ends) else total
+        cur = e0
     if cur < total - 0.02:
         regions.append((cur, total))
     return regions
@@ -79,7 +80,9 @@ def speech_regions(wav):
 def snap(words, regions):
     """Assign each word to the speech region it overlaps most (or the nearest), clamp it inside,
     and pin the first/last word of each region to the region edges. Whisper's own timestamps
-    tend to stretch words across pauses; speech energy is a better boundary."""
+    tend to stretch words across pauses; speech energy is a better boundary. A word more than
+    0.3 s from any speech is dropped: whisper invents text in silence (typically a repeat of
+    the last sentence after the speaker stops). Returns the words kept."""
     def pick(w):
         best, score = None, None
         for r in regions:
@@ -88,10 +91,14 @@ def snap(words, regions):
             key = (ov if ov > 0 else -dist)
             if score is None or key > score:
                 best, score = r, key
-        return best
-    groups = {}
+        return best if score is not None and score > -0.3 else None
+    groups, kept = {}, []
     for w in words:
-        groups.setdefault(pick(w), []).append(w)
+        r = pick(w)
+        if r is not None:
+            groups.setdefault(r, []).append(w)
+            kept.append(w)
+    words = kept
     for r, ws in groups.items():
         for w in ws:
             w["start"] = round(min(max(w["start"], r[0]), r[1] - 0.05), 3)
@@ -103,12 +110,13 @@ def snap(words, regions):
             words[i]["start"] = words[i - 1]["start"]
         if words[i - 1]["end"] > words[i]["start"] and words[i - 1]["end"] - words[i - 1]["start"] > 0.05:
             words[i - 1]["end"] = max(words[i - 1]["start"] + 0.05, words[i]["start"])
+    return words
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input"); ap.add_argument("out")
-    ap.add_argument("--model", default="base.en")
+    ap.add_argument("--model", default=os.environ.get("WHISPER_MODEL") or "base.en")
     ap.add_argument("--models-dir")
     ap.add_argument("--lang", default="en")
     ap.add_argument("--no-dtw", dest="dtw", action="store_false")
@@ -121,7 +129,14 @@ def main():
     cli = shutil.which("whisper-cli")
     if not cli:
         av.die("whisper-cli not found (brew install whisper-cpp)", 127)
-    model = ensure_model(a.model, models_dir(a.models_dir), a.download)
+    mdir = a.models_dir or os.environ.get("WHISPER_MODELS_DIR") or os.path.expanduser("~/.cache/whisper.cpp")
+    model = ensure_model(a.model, mdir, a.download)
+    if not av.media_info(a.input)["audio_tracks"]:
+        av.die("no audio track to transcribe in %s" % a.input)
+    preset = dtw_preset(a.model)
+    if a.dtw and not preset:
+        sys.stderr.write("note: no DTW alignment preset for model %s; using whisper's own word times\n" % a.model)
+        a.dtw = False
 
     with tempfile.TemporaryDirectory() as td:
         wav = os.path.join(td, "in.wav")
@@ -131,14 +146,18 @@ def main():
         cmd = [cli, "-m", model, "-f", wav, "-l", a.lang, "-t", str(a.threads),
                "-ojf", "-ml", "1", "-sow", "-np", "-of", base]
         if a.dtw:
-            cmd += ["-dtw", a.model, "-nfa"]
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-        if p.returncode != 0:
-            sys.stderr.write(p.stderr[-3000:])
-            av.die("whisper-cli failed", p.returncode)
-        with open(base + ".json") as f:
-            raw = json.load(f)
-        speech = [] if a.no_snap else speech_regions(wav)
+            cmd += ["-dtw", preset, "-nfa"]
+        # whisper invents words for silent input ("You", "Thank you."): do not run it on silence
+        silent = (av.max_volume_db(wav) or 0) < -80
+        raw = {}
+        if not silent:
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            if p.returncode != 0:
+                sys.stderr.write(p.stderr[-3000:])
+                av.die("whisper-cli failed", p.returncode)
+            with open(base + ".json") as f:
+                raw = json.load(f)
+        speech = None if a.no_snap or silent else speech_regions(wav)
 
     words = []
     for seg in raw.get("transcription", []):
@@ -161,8 +180,8 @@ def main():
     if a.dtw:  # DTW gives starts; each word then ends where the next begins
         for i, w in enumerate(words[:-1]):
             w["end"] = round(max(w["start"] + 0.05, words[i + 1]["start"]), 3)
-    if speech:
-        snap(words, speech)
+    if speech is not None:
+        words = snap(words, speech)
     out = {"model": a.model, "duration": round(av.duration(a.input), 3),
            "text": " ".join(w["word"] for w in words), "words": words}
     with open(a.out, "w") as f:

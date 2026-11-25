@@ -9,14 +9,11 @@ A magenta square marker moves along the scripted cursor path; at each click the 
 button flashes green for 0.6 s and the audio track beeps (1 kHz), so trims, speed-ups,
 zoom targets, the rendered cursor position and audio sync can all be checked by eye.
 
-Writes:
-  <out>.mp4               the clip (H.264 + AAC)
-  <out>.mp4.cursor.json   OpenScreen-style telemetry (version 2) for the same path
-  <out>.plan.json         ground truth: panel boxes, click times/positions
+Writes <out>.mp4 (H.264 + AAC) and <out>.mp4.cursor.json, OpenScreen-style telemetry
+(version 2, a sample every 33 ms) for the same path.
 
 Usage:
   make-test-footage.py OUT_BASENAME [--width 2560 --height 1440 --fps 60 --duration 50]
-                       [--sample-ms 33] [--no-marker]
 """
 
 import argparse
@@ -160,8 +157,6 @@ def main():
     ap.add_argument("--height", type=int, default=1440)
     ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--duration", type=float, default=50.0)
-    ap.add_argument("--sample-ms", type=float, default=33.0, help="telemetry sample interval (OpenScreen uses ~33)")
-    ap.add_argument("--no-marker", action="store_true", help="do not draw the magenta cursor marker into the video")
     a = ap.parse_args()
     if a.duration < 30:
         sys.exit("--duration must be >= 30")
@@ -170,15 +165,15 @@ def main():
     script = cursor_script(lay, D)
     clicks = [(t, x, y) for t, x, y, c in script if c]
     tmp = tempfile.mkdtemp(prefix="testfootage-")
-    base = os.path.join(tmp, "base.ppm")
-    draw_base(W, H, lay).write_ppm(base)
+    base = os.path.join(tmp, "base.png")
+    draw_base(W, H, lay).write_png(base)
     s = lay["scale"]
     # per-second readout images
     tw, th = int(560 * s), int(100 * s)
     for sec in range(int(math.ceil(D)) + 1):
         c = Canvas(tw, th, (20, 22, 28))
         c.text(int(20 * s), int(22 * s), "SRC %02d:%02d" % (sec // 60, sec % 60), scale=max(1, int(8 * s)), color=(255, 230, 90))
-        c.write_ppm(os.path.join(tmp, "ts%04d.ppm" % sec))
+        c.write_png(os.path.join(tmp, "ts%04d.png" % sec))
     ruler_x0, ruler_w = int(400 * s), W - int(400 * s) - int(620 * s)
     ruler_y = H - int(110 * s)
     filters = []
@@ -192,24 +187,23 @@ def main():
     chain = ",".join(filters)
     tick = "[bg][2:v]overlay=x='%d+t*%f':y=%d:eval=frame[a]" % (ruler_x0, ruler_w / D, ruler_y)
     stamp = "[a][1:v]overlay=x=%d:y=%d[b]" % (W - tw - int(150 * s), int(5 * s))
-    graph = [chain, tick, stamp]
-    last = "b"
-    if not a.no_marker:
-        m = int(28 * s)
-        xe, ye = piecewise_expr(script, "x"), piecewise_expr(script, "y")
-        graph.append("[b][3:v]overlay=x='%s-%d':y='%s-%d':eval=frame[c]" % (xe, m // 2, ye, m // 2))
-        graph.append("[c][4:v]overlay=x='%s-%d':y='%s-%d':eval=frame[d]" % (xe, m // 2 - int(5 * s), ye, m // 2 - int(5 * s)))
-        last = "d"
-    graph.append("[%s]format=yuv420p[v]" % last)
+    # magenta cursor marker in a black frame, moving along the scripted path
+    m = int(28 * s)
+    xe, ye = piecewise_expr(script, "x"), piecewise_expr(script, "y")
+    marker = ("[b][3:v]overlay=x='%s-%d':y='%s-%d':eval=frame[c];"
+              "[c][4:v]overlay=x='%s-%d':y='%s-%d':eval=frame[d]"
+              % (xe, m // 2, ye, m // 2, xe, m // 2 - int(5 * s), ye, m // 2 - int(5 * s)))
+    graph = [chain, tick, stamp, marker, "[d]format=yuv420p[v]"]
     # audio: 1 kHz beep 120 ms at each click, silence elsewhere
     vol = "+".join("between(t,%.3f,%.3f)" % (t, t + 0.12) for t, _, _ in clicks) or "0"
-    m = int(28 * s)
+    # every generated input gets a length (d=): endless colour sources beside finite inputs
+    # make ffmpeg stall now and then instead of finishing
     cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y",
            "-loop", "1", "-framerate", str(a.fps), "-t", str(D), "-i", base,
-           "-framerate", "1", "-i", os.path.join(tmp, "ts%04d.ppm"),
-           "-f", "lavfi", "-i", "color=c=0xE11D48:s=%dx%d:r=%d" % (int(6 * s) or 2, int(44 * s), a.fps),
-           "-f", "lavfi", "-i", "color=c=black:s=%dx%d:r=%d" % (m, m, a.fps),
-           "-f", "lavfi", "-i", "color=c=0xFF00FF:s=%dx%d:r=%d" % (m - 2 * int(5 * s), m - 2 * int(5 * s), a.fps),
+           "-framerate", "1", "-i", os.path.join(tmp, "ts%04d.png"),
+           "-f", "lavfi", "-i", "color=c=0xE11D48:s=%dx%d:r=%d:d=%s" % (int(6 * s) or 2, int(44 * s), a.fps, D),
+           "-f", "lavfi", "-i", "color=c=black:s=%dx%d:r=%d:d=%s" % (m, m, a.fps, D),
+           "-f", "lavfi", "-i", "color=c=0xFF00FF:s=%dx%d:r=%d:d=%s" % (m - 2 * int(5 * s), m - 2 * int(5 * s), a.fps, D),
            "-f", "lavfi", "-i", "sine=f=1000:r=48000:d=%s" % D,
            "-filter_complex", ";".join(graph) + ";[5:a]volume='if(%s,0.6,0)':eval=frame[aout]" % vol,
            "-map", "[v]", "-map", "[aout]", "-t", str(D), "-r", str(a.fps),
@@ -219,7 +213,7 @@ def main():
     # telemetry
     samples = []
     t = 0.0
-    step = a.sample_ms / 1000.0
+    step = 0.033  # OpenScreen samples about every 33 ms
     click_set = sorted(t for t, _, _ in clicks)
     ci = 0
     pending_up = None
@@ -235,11 +229,6 @@ def main():
         t += step
     with open(a.out + ".mp4.cursor.json", "w") as fh:
         json.dump({"version": 2, "provider": "none", "samples": samples, "assets": []}, fh)
-    with open(a.out + ".plan.json", "w") as fh:
-        json.dump({"width": W, "height": H, "fps": a.fps, "duration": D,
-                   "panels": lay["panels"], "clicks": [{"t": round(t, 3), "x": round(x), "y": round(y)} for t, x, y in clicks],
-                   "waypoints": [{"t": round(t, 3), "x": round(x), "y": round(y), "click": c} for t, x, y, c in script]},
-                  fh, indent=1)
     print(a.out + ".mp4")
 
 

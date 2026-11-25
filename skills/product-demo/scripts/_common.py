@@ -1,20 +1,10 @@
 """Shared helpers for the product-demo scripts. Python 3.9+ stdlib only, macOS.
 
-Not a public API: imported by the sibling scripts only.
-
-OpenScreen launch rules (verified with OpenScreen 2.3.0):
-- Capture (`sources`, `record`) works only when launched through LaunchServices:
-  `open -n -a /Applications/Openscreen.app --stdout F --stderr G --args ...`. macOS then checks
-  Screen Recording / Accessibility / Microphone against Openscreen itself. Run as a child of a
-  terminal or agent, the check is made against that hosting app and fails with
-  "Failed to get sources".
-- `open` always exits 0, does not pass the environment, resolves arguments after `--args`
-  with cwd "/" (so only absolute paths work) and does not return the app's PID. The recorder
-  PID is found with `ps` by the unique `--project` path.
-- `export`, `info` and `pack` need no capture permission: run the real binary directly to get
-  live NDJSON and real exit codes. Never use the Homebrew `openscreen` symlink (it crashes).
+Imported by the sibling scripts only; not meant to be run. How the scripts drive OpenScreen,
+and why: references/openscreen.md.
 """
 
+import bisect
 import json
 import os
 import re
@@ -23,7 +13,6 @@ import struct
 import subprocess
 import sys
 import tempfile
-import time
 import zlib
 
 FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
@@ -41,8 +30,9 @@ DEFAULT_LRA = 20.0
 # contain-fitted into the frame minus its padding (fit = 1 - padding% x 0.4). So a 1280 px
 # capture stops near x1.45 and a 2560 px one near x2.77. A capture narrower than UPSCALE_BELOW
 # is therefore zoomed from a 2x lanczos-upscaled working copy (same timestamps, same
-# normalised telemetry): see working_copy.
-UPSCALE_BELOW = 2400
+# normalised telemetry): see working_copy. 2440 px is the narrowest 16:9 capture that reaches
+# x2.64 on its own, the depth a "phone-legible" zoom (38% of the width) needs.
+UPSCALE_BELOW = 2440
 
 
 def max_zoom(view_width, view_height=None, padding=10):
@@ -161,14 +151,6 @@ def run(cmd, capture=False):
 
 # ----------------------------------------------------------------------------- ffprobe
 
-def probe(path):
-    if not os.path.exists(path):
-        die("file not found: %s" % os.path.abspath(path))
-    p = run([FFPROBE, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path],
-            capture=True)
-    return json.loads(p.stdout)
-
-
 def _rate(s):
     num, _, den = (s or "0/1").partition("/")
     try:
@@ -233,6 +215,16 @@ def max_volume_db(path, seconds=None):
     return float("-inf") if m.group(1) == "-inf" else float(m.group(1))
 
 
+def silence_ranges(path, noise_db, min_dur):
+    """[(start, end)] of the first audio track's silences (silencedetect); an open one ends at the end."""
+    p = run([FFMPEG, "-nostdin", "-hide_banner", "-i", path, "-map", "0:a:0", "-af",
+             "silencedetect=n=%.1fdB:d=%.3f" % (noise_db, min_dur), "-f", "null", "-"])
+    starts = [float(x) for x in re.findall(r"silence_start: (-?[0-9.]+)", p.stderr)]
+    ends = [float(x) for x in re.findall(r"silence_end: ([0-9.]+)", p.stderr)]
+    total = duration(path)
+    return [(max(0.0, s), ends[i] if i < len(ends) else total) for i, s in enumerate(starts)]
+
+
 # ----------------------------------------------------------------------------- loudness
 
 def parse_loudnorm(stderr):
@@ -267,8 +259,59 @@ def verify_loudness(path):
 
 
 def loudness_gain_db(inputs, filtergraph, out_label, target):
+    """Gain that brings [out_label] to target LUFS, or None when it is silent."""
     i = float(measure_loudness(inputs, filtergraph, out_label)["input_i"])
-    return 0.0 if i < -70 else target - i
+    return None if i < -70 else target - i
+
+
+def music_input(path):
+    return ["-stream_loop", "-1", "-i", path]
+
+
+def music_chain(index, dur, fade_in, fade_out, label, start=0.0):
+    """Input `index` (opened with music_input) from `start` s into the song for dur s, faded in
+    and out, as [label]. The start is trimmed here, not with -ss on the input: -ss together
+    with -stream_loop makes every repeat begin mid-song. afade reads d=0 as "default length",
+    so a zero-length fade is left out."""
+    fi, fo = min(fade_in, dur / 2), min(fade_out, dur / 2)
+    chain = "[%d:a:0]aformat=sample_rates=48000:channel_layouts=stereo,atrim=%.6f:%.6f,asetpts=N/SR/TB" % (
+        index, start, start + dur)
+    if fi > 0:
+        chain += ",afade=t=in:st=0:d=%.3f" % fi
+    if fo > 0:
+        chain += ",afade=t=out:st=%.6f:d=%.3f" % (dur - fo, fo)
+    return chain + "[%s]" % label
+
+
+def mux_audio(inputs, filtergraph, label, dur, out, lufs=DEFAULT_LUFS, tp=DEFAULT_TP):
+    """Normalise [label] to lufs (two-pass loudnorm) and write out: input 0's video copied, the
+    audio as AAC-LC 48 kHz stereo 192 kb/s. Prints the loudness measured on the written file.
+
+    AAC encoding can overshoot loudnorm's peak limit by a few tenths of a dB, so when the file
+    comes out above tp, the limit is lowered by the overshoot and it is encoded again (at most
+    twice)."""
+    limit = tp
+    for attempt in (1, 2, 3):
+        meas = measure_loudness(inputs, filtergraph, label, lufs=lufs, tp=limit)
+        if float(meas["input_i"]) < -70:  # also -inf, which loudnorm's second pass rejects
+            die("nothing to hear: the audio for %s is silent" % out)
+        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y"]
+        for i in inputs:
+            cmd += i
+        run(cmd + ["-filter_complex", "%s;[%s]%s[aout]" % (filtergraph, label, loudnorm_pass2(meas, lufs, limit)),
+                   "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
+                   "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-t", "%.6f" % dur,
+                   "-movflags", "+faststart", out])
+        v = verify_loudness(out)
+        if v["true_peak"] <= tp + 0.01 or attempt == 3:
+            break
+        limit -= v["true_peak"] - tp + 0.2
+    print("wrote %s  duration=%.2fs  loudness=%.1f LUFS  true_peak=%.1f dBTP"
+          % (out, duration(out), v["lufs"], v["true_peak"]))
+    if abs(v["lufs"] - lufs) > 1:
+        print("note: that is %.1f LU from the %.1f LUFS target; the peak limit forced a gentler "
+              "normalisation (common with a little speech over a music bed). Pass --lufs to compensate."
+              % (v["lufs"] - lufs, lufs))
 
 
 # ----------------------------------------------------------------------------- OpenScreen
@@ -277,7 +320,7 @@ def find_app():
     for c in (os.environ.get("OPENSCREEN_APP", ""), "/Applications/Openscreen.app",
               os.path.expanduser("~/Applications/Openscreen.app")):
         if c and os.path.isfile(os.path.join(c, "Contents", "MacOS", "Openscreen")):
-            return c
+            return os.path.realpath(c)  # `ps` shows the real path; recorders() matches on it
     return None
 
 
@@ -298,27 +341,37 @@ def direct_env():
 
 
 def launch_capture(app, args, stdout_path, stderr_path, wait=False):
-    """Start an OpenScreen capture command through LaunchServices. All paths absolute."""
+    """Start an OpenScreen capture command through LaunchServices. All paths absolute.
+
+    Only through `open` does macOS check Screen Recording, Microphone and Accessibility against
+    Openscreen itself; as a child of a terminal or agent it checks that app and fails with
+    "Failed to get sources". `open` always exits 0, passes no environment, resolves arguments
+    after --args with cwd "/" and does not return the PID (recorders() finds it)."""
     cmd = ["open", "-n"] + (["-W"] if wait else []) + [
         "-a", app, "--stdout", stdout_path, "--stderr", stderr_path, "--args"] + list(args)
     return subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE, text=True)
 
 
-def read_events(path):
+def parse_events(lines):
+    """OpenScreen's NDJSON events; other lines are ignored."""
     events = []
+    for line in lines:
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                pass
+    return events
+
+
+def read_events(path):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("{"):
-                    try:
-                        events.append(json.loads(line))
-                    except ValueError:
-                        pass
+            return parse_events(f)
     except (FileNotFoundError, TypeError):
-        pass
-    return events
+        return []
 
 
 def done_event(events):
@@ -331,6 +384,7 @@ def done_event(events):
 def explain_error(text):
     if not text:
         return "OpenScreen failed without a message (see the stderr log)."
+    text = re.split(r"\n\s+at ", text, 1)[0]  # drop the JavaScript stack trace
     if "Failed to get sources" in text:
         return SCREEN_PERMISSION_MSG
     low = text.lower()
@@ -357,7 +411,8 @@ def get_sources(app, timeout=30):
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            proc.kill()  # only the `open -W` wrapper; the app itself must be stopped too
+            subprocess.run(["pkill", "-f", re.escape(app_binary(app)) + " sources"])
             raise RuntimeError("OpenScreen did not answer `sources` within %ss." % timeout)
         done = done_event(read_events(out))
         if not done:
@@ -369,20 +424,31 @@ def get_sources(app, timeout=30):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def ps_table():
+def recorders(app, marker=None):
+    """[(pid, cmd)] of running OpenScreen `record` processes (optionally containing marker, the
+    take's unique --project path: `open` does not return the recorder's PID)."""
+    prefix = app_binary(app) + " record"
     out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
     rows = []
     for line in out.splitlines():
         pid, _, cmd = line.strip().partition(" ")
-        if pid.isdigit():
-            rows.append((int(pid), cmd.strip()))
+        cmd = cmd.strip()
+        if pid.isdigit() and cmd.startswith(prefix) and (marker is None or marker in cmd):
+            rows.append((int(pid), cmd))
     return rows
 
 
-def recorders(app, marker=None):
-    """[(pid, cmd)] of running OpenScreen `record` processes (optionally containing marker)."""
-    prefix = app_binary(app) + " record"
-    return [(p, c) for p, c in ps_table() if c.startswith(prefix) and (marker is None or marker in c)]
+# record-start.py writes this into the demo folder while a take runs; record-stop.py moves it
+# into the take folder as take.json.
+STATE = ".recording.json"
+
+
+def load_state(demo):
+    try:
+        with open(os.path.join(demo, STATE)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 def pid_alive(pid):
@@ -398,28 +464,18 @@ def pid_alive(pid):
 
 
 def run_openscreen(args, timeout=600):
-    """Run a non-capture OpenScreen command (info/pack/export) directly. Returns
-    (returncode, events, stdout, stderr)."""
+    """Run a non-capture OpenScreen command (info/pack/export) directly: they need no capture
+    permission, and run directly they give real exit codes. Never via the Homebrew `openscreen`
+    symlink (it crashes). Returns (returncode, events, stdout, stderr)."""
     app = require_app()
     r = subprocess.run([app_binary(app)] + list(args), capture_output=True, text=True,
                        env=direct_env(), stdin=subprocess.DEVNULL, timeout=timeout)
-    evs = []
-    for line in r.stdout.splitlines():
-        if line.startswith("{"):
-            try:
-                evs.append(json.loads(line))
-            except ValueError:
-                pass
-    return r.returncode, evs, r.stdout, r.stderr
+    return r.returncode, parse_events(r.stdout.splitlines()), r.stdout, r.stderr
 
 
 # ----------------------------------------------------------------------------- telemetry
 
 CLICK_KINDS = ("click", "double-click", "right-click", "middle-click")
-
-
-def telemetry_path(video):
-    return video + ".cursor.json"
 
 
 def load_samples(path):
@@ -574,11 +630,6 @@ class Canvas:
             fh.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", self.w, self.h, 8, 2, 0, 0, 0))
                      + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b""))
 
-    def write_ppm(self, path):
-        with open(path, "wb") as fh:
-            fh.write(b"P6\n%d %d\n255\n" % (self.w, self.h))
-            fh.write(self.buf)
-
 
 def text_size(text, scale):
     lines = text.split("\n")
@@ -586,14 +637,30 @@ def text_size(text, scale):
             max(0, len(lines) * (GLYPH_H + 2) * scale - 2 * scale))
 
 
+_frame_times = {}
+
+
+def frame_time(path, t):
+    """Timestamp of the frame that is on screen at t. A take is variable frame rate (a frame
+    only when the picture changes), and seeking to t itself returns the NEXT frame, which
+    during a still stretch can be seconds later."""
+    if path not in _frame_times:
+        out = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "packet=pts_time", "-of", "csv=p=0", path], capture_output=True, text=True).stdout
+        _frame_times[path] = sorted(float(x) for x in re.findall(r"^-?[0-9.]+", out, re.M))
+    times = _frame_times[path]
+    return times[max(0, bisect.bisect_right(times, t + 1e-6) - 1)] if times else t
+
+
 def grab_frame(path, t, width, height=None, crop=None):
-    """One decoded frame at t seconds as a Canvas scaled to width (crop = x, y, w, h first)."""
+    """The frame on screen at t seconds as a Canvas scaled to width (crop = x, y, w, h first)."""
+    t = max(0.0, frame_time(path, t) - 0.001)
     vf = []
     if crop:
         x, y, w, h = crop
         vf.append("crop=%d:%d:%d:%d" % (w, h, x, y))
     vf.append("scale=%d:%s:flags=lanczos" % (width, height if height else -2))
-    data = subprocess.run([FFMPEG, "-nostdin", "-v", "error", "-ss", "%.3f" % max(0.0, t), "-i", path, "-frames:v", "1",
+    data = subprocess.run([FFMPEG, "-nostdin", "-v", "error", "-ss", "%.3f" % t, "-i", path, "-frames:v", "1",
                            "-vf", ",".join(vf), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
                           capture_output=True).stdout
     if not data:
@@ -601,10 +668,6 @@ def grab_frame(path, t, width, height=None, crop=None):
     if height is None:
         height = len(data) // (width * 3)
     return Canvas.from_rgb(width, height, data[: width * height * 3])
-
-
-def now():
-    return time.time()
 
 
 def ffprobe_info(path):
@@ -615,9 +678,10 @@ def ffprobe_info(path):
     return i["width"], i["height"], i["duration"], i["fps"]
 
 
-def has_stream(path, kind):
-    return any(s.get("codec_type") == kind for s in probe(path)["streams"])
-
-
-def video_fps(path):
-    return media_info(path)["fps"] or 30.0
+def render_text_pngs(spec, spec_path):
+    """Render text PNGs with macOS AppKit (render-caption-pngs.js; spec format in its header):
+    Homebrew ffmpeg has no drawtext or libass. Returns the finished osascript process."""
+    with open(spec_path, "w") as f:
+        json.dump(spec, f)
+    return subprocess.run(["osascript", "-l", "JavaScript", os.path.join(HERE, "render-caption-pngs.js"),
+                           spec_path], capture_output=True, text=True)

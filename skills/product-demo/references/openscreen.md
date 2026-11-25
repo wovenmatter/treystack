@@ -31,13 +31,13 @@ Rules the scripts follow (in `scripts/_common.py`):
   killed, the raw video usually survives and `record-stop.py` salvages it.
 - Output: an H.264 MP4 with a **variable frame rate** (frames only when the picture changes,
   up to 60), the full window including its title bar (a 1600x1000 window gives 1600x1032).
-  On a Retina screen expect about double the pixel size (not verified). Zooms: the export
-  never enlarges the capture more than 2x (`MAX_SOURCE_MAGNIFICATION`), so a capture narrower
-  than 2400 px is zoomed from a 2x upscaled working copy (`delivery.md`, Phone legibility).
-  The project document gives the copy as the asset (path and doubled size); every position
-  in it is normalised, so nothing else changes, and OpenScreen finds the telemetry at
-  `<copy>.cursor.json`. The drawn cursor and blur blocks are sized in output pixels, so they
-  look the same from either file.
+  On a Retina screen expect about double the pixel size (not verified).
+- Zooms: the export never enlarges the capture more than 2x (`MAX_SOURCE_MAGNIFICATION`), so
+  narrow captures are zoomed from a 2x upscaled working copy (`delivery.md`, Phone
+  legibility). The project document gives the copy as the asset (path and doubled size);
+  every position in it is normalised, so nothing else changes, and OpenScreen finds the
+  telemetry at `<copy>.cursor.json`. The drawn cursor and blur blocks are sized in output
+  pixels, so they look the same from either file.
 - Audio: none unless `--mic` and/or `--system-audio`; then **one** AAC track mixing both, in
   the same MP4.
 - `<video>.cursor.json`: cursor telemetry, about 23 samples per second, `cx`/`cy` in 0–1 of the

@@ -6,13 +6,14 @@
 # 2x working copy a 1x-sized take gets) ->
 # frames.py -> phone-preview.py -> add-music.py (a generated tone) -> encode-final.py.
 # Prints one line per step and "selftest ok" at the end (exit 0), or the failing step (exit 1).
-# Takes about 30 s. WORK_DIR defaults to a new temporary folder (kept, path printed).
+# Takes about 20 s. WORK_DIR defaults to a new temporary folder (kept, path printed).
 case "${1:-}" in -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0;; esac
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=${1:-$(mktemp -d "${TMPDIR:-/tmp}/product-demo-selftest.XXXXXX")}
 mkdir -p "$W/takes/take-1" "$W/drafts" "$W/audio" "$W/check"
 cd "$W" || exit 1
+rm -f edit.json edit-plain.json takes/take-1/take.x2.mp4*  # so a WORK_DIR can be reused
 step() { local name=$1; shift; local t0=$SECONDS
   if "$@" > "$W/check/$name.log" 2>&1; then printf 'ok    %-14s %3ss\n' "$name" $((SECONDS - t0))
   else printf 'FAIL  %-14s (log: %s)\n' "$name" "$W/check/$name.log"; tail -5 "$W/check/$name.log"; exit 1; fi; }

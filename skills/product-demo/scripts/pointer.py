@@ -59,13 +59,20 @@ def where():
     return float(x), float(y)
 
 
-def ease_to(x, y, ms):
+def at(x, y):
+    """cliclick coordinates. A bare leading minus means a relative move, so absolute negative
+    values (a display left of or above the main one) need the "=" prefix."""
+    return ",".join(("=%d" if v < 0 else "%d") % v for v in (round(x), round(y)))
+
+
+def ease_to(x, y, ms, verb="m"):
+    """verb "m" moves; "dm" continues a drag (apps ignore plain moves while the button is down)."""
     x0, y0 = where()
     steps = max(2, int(ms / 16))
     for i in range(1, steps + 1):
         u = i / float(steps)
         u = u * u * (3 - 2 * u)
-        cli("m:%d,%d" % (round(x0 + (x - x0) * u), round(y0 + (y - y0) * u)))
+        cli("%s:%s" % (verb, at(x0 + (x - x0) * u, y0 + (y - y0) * u)))
         time.sleep(ms / 1000.0 / steps)
     if abs(where()[0] - x) > 2 or abs(where()[1] - y) > 2:
         fail_access()  # cliclick reported success but the pointer did not move
@@ -90,9 +97,11 @@ def main(argv):
     args = [x for x in args if x not in flags]
     if cmd == "check":
         x, y = where()
-        cli("m:%d,%d" % (x + 3, y))
-        moved = abs(where()[0] - (x + 3)) <= 1
-        cli("m:%d,%d" % (x, y))
+        moved = False
+        for dx in (3, -3):  # at a screen edge the pointer can only move inwards
+            cli("m:" + at(x + dx, y))
+            moved = moved or abs(where()[0] - (x + dx)) <= 1
+        cli("m:" + at(x, y))
         if not moved:
             fail_access()
         print("ok")
@@ -107,7 +116,7 @@ def main(argv):
     elif cmd == "drag":
         ease_to(float(args[0]), float(args[1]), ms / 2)
         cli("dd:.")
-        ease_to(float(args[2]), float(args[3]), ms)
+        ease_to(float(args[2]), float(args[3]), ms, "dm")
         cli("du:.")
     elif cmd == "type":
         cli("-w", "40", "t:" + " ".join(args))

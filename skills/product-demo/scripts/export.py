@@ -2,7 +2,7 @@
 """Render a draft with OpenScreen's headless export.
 
 usage: export.py EDIT.json|PROJECT.openscreen -o OUT.mp4 [--fps 30|60|24]
-                 [--quality good|medium|source] [--timeout S] [--quiet] [--log FILE] [-- APP ARGS]
+                 [--quality good|medium|source] [--timeout S] [--quiet]
 
 - Given edit.json it first rebuilds the project (edit.py build), so "edit the JSON, run
   export.py" is the whole re-render loop.
@@ -11,7 +11,6 @@ usage: export.py EDIT.json|PROJECT.openscreen -o OUT.mp4 [--fps 30|60|24]
 - --quality good (default) with aspect 16:9 gives exactly 1920x1080. Default fps 30.
 - Progress goes to stderr every 10%. On success prints: OUT  (wall s)  WxH codec fps dur size audio.
 - Exit code: 0 ok, the app's code (or 1) on failure with its message, 124 timeout, 130 Ctrl-C.
-Anything after "--" is passed to `openscreen export` unchanged.
 """
 
 import argparse
@@ -28,11 +27,6 @@ import _common as c  # noqa: E402
 
 
 def main():
-    argv = sys.argv[1:]
-    passthrough = []
-    if "--" in argv:
-        i = argv.index("--")
-        argv, passthrough = argv[:i], argv[i + 1:]
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("project")
     ap.add_argument("-o", "--out", required=True)
@@ -40,8 +34,7 @@ def main():
     ap.add_argument("--fps", choices=["24", "30", "60"], default="30")
     ap.add_argument("--timeout", type=float, default=1800)
     ap.add_argument("--quiet", action="store_true")
-    ap.add_argument("--log", help="also write the app's raw output here")
-    a = ap.parse_args(argv)
+    a = ap.parse_args()
 
     project = os.path.abspath(a.project)
     if not os.path.exists(project):
@@ -57,9 +50,7 @@ def main():
     out = os.path.abspath(a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     cmd = [c.app_binary(app), "export", project, "--json", "--out", out, "--quality", a.quality,
-           "--fps", a.fps] + passthrough
-
-    log = open(a.log, "w") if a.log else None
+           "--fps", a.fps]
     t0 = time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=c.direct_env(),
                             stdin=subprocess.DEVNULL, start_new_session=True)
@@ -68,8 +59,6 @@ def main():
     def pump():
         for line in proc.stderr:
             errs.append(line)
-            if log:
-                log.write("[stderr] " + line)
     th = threading.Thread(target=pump, daemon=True)
     th.start()
 
@@ -84,8 +73,6 @@ def main():
     done, err_msg, bucket = None, None, -1
     try:
         for line in proc.stdout:
-            if log:
-                log.write(line)
             try:
                 ev = json.loads(line.strip())
             except ValueError:
@@ -110,8 +97,6 @@ def main():
         timer.cancel()
     rc = proc.wait()
     th.join(timeout=5)
-    if log:
-        log.close()
     elapsed = time.time() - t0
     if timed_out:
         kill(signal.SIGKILL)

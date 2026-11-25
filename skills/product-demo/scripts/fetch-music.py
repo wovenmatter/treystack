@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fetch ONE royalty-free music track into a demo folder, with its licence and source.
 
-usage: fetch-music.py DEMO_DIR [--source mixkit|incompetech] [--mood positive] [--list]
+usage: fetch-music.py DEMO_DIR [--source mixkit|incompetech] [--mood MOOD] [--list]
                       [--pick N] [--min-sec 60]
 
   --source mixkit       (default) Mixkit Stock Music Free License: commercial and social-media
@@ -11,6 +11,7 @@ usage: fetch-music.py DEMO_DIR [--source mixkit|incompetech] [--mood positive] [
   --source incompetech  Kevin MacLeod, CC BY 4.0: free commercial use but the credit line
                         MUST be published with the video (post text, reply, or page caption).
                         --mood matches the catalogue's "feel" (Bright, Uplifting, Driving, ...).
+  --mood                defaults to positive (mixkit) or Bright (incompetech).
   --list                show the candidates (title, length) and download nothing.
   --pick N              take candidate N from --list (default 1).
   --min-sec S           skip tracks shorter than S seconds (default 60) where length is known.
@@ -90,11 +91,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("demo_dir")
     ap.add_argument("--source", choices=["mixkit", "incompetech"], default="mixkit")
-    ap.add_argument("--mood", default="positive")
+    ap.add_argument("--mood", help="default: positive (mixkit), Bright (incompetech)")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--pick", type=int, default=1)
     ap.add_argument("--min-sec", type=float, default=60)
     a = ap.parse_args()
+    a.mood = a.mood or ("positive" if a.source == "mixkit" else "Bright")
     try:
         cands = mixkit(a.mood, a.min_sec) if a.source == "mixkit" else incompetech(a.mood, a.min_sec)
     except Exception as e:  # noqa: BLE001
