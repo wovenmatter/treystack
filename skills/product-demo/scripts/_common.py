@@ -292,7 +292,7 @@ def find_app():
     for c in (os.environ.get("OPENSCREEN_APP", ""), "/Applications/Openscreen.app",
               os.path.expanduser("~/Applications/Openscreen.app")):
         if c and os.path.isfile(os.path.join(c, "Contents", "MacOS", "Openscreen")):
-            return c
+            return os.path.realpath(c)  # `ps` shows the real path; recorders() matches on it
     return None
 
 
@@ -356,6 +356,7 @@ def done_event(events):
 def explain_error(text):
     if not text:
         return "OpenScreen failed without a message (see the stderr log)."
+    text = re.split(r"\n\s+at ", text, 1)[0]  # drop the JavaScript stack trace
     if "Failed to get sources" in text:
         return SCREEN_PERMISSION_MSG
     low = text.lower()
@@ -382,7 +383,8 @@ def get_sources(app, timeout=30):
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            proc.kill()  # only the `open -W` wrapper; the app itself must be stopped too
+            subprocess.run(["pkill", "-f", re.escape(app_binary(app)) + " sources"])
             raise RuntimeError("OpenScreen did not answer `sources` within %ss." % timeout)
         done = done_event(read_events(out))
         if not done:

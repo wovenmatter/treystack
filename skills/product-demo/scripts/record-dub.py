@@ -55,7 +55,8 @@ def build_playback(video, out, countdown, width, td):
         if av.render_text_pngs(spec, os.path.join(td, "cd.json")).returncode == 0:
             fg += "[b0]"
             for i, it in enumerate(items):
-                inputs += ["-loop", "1", "-t", "1", "-i", it["file"]]
+                # -itsoffset: digit i is on screen from second i to i + 1
+                inputs += ["-loop", "1", "-t", "1", "-itsoffset", str(i), "-i", it["file"]]
                 fg += ";[b%d][%d:v]overlay=enable='between(t,%d,%d)':eof_action=pass[b%d]" % (i, i + 1, i, i + 1, i + 1)
             fg += ";[b%d]null" % len(items)
     fg += "[v]"
