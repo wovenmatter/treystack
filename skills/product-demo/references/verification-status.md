@@ -31,13 +31,13 @@ telemetry or audio only. **Unverified** = not run.
 | `plan-zooms.py` clusters and view clamping | Real samples with three injected clicks |
 | `plan-zooms.py` ignores clicks outside the recorded window | Tested only by construction |
 | Zoom depth cap (2 output px per capture px; with padding 10 a 1280x720 view stops at x1.38, 2560x1440 at x2.77; deeper values render identically) | Real 1280 px takes + synthetic 1280/1920/2560 px footage; formula matches OpenScreen's source |
-| 2x working copy for takes under 2400 px: a x3 zoom renders at x2.74 instead of x1.38; 14 px text readable at phone width | Real 41 s 1x take, renders compared |
+| 2x working copy for takes under 2440 px: a x3 zoom renders at x2.74 instead of x1.38; 14 px text readable at phone width | Real 41 s 1x take, renders compared |
 | Working copy alignment: all 1334 frame timestamps identical; a moving tick within 1 frame; drawn cursor and zoom focus on the same button in both renders | Real take + injected test telemetry |
 | Working copy made once per take (3.7 s for 41 s, 6.3 MB) and reused; plain look makes none | Real; selftest checks both |
 | Zoom holds end 1.2 s before the kept footage ends; summary warns otherwise | Real |
 | `hide_cursor`; blur follows zooms | Real |
 | Drawn cursor position and timing vs the video | Unverified: the pointer stayed outside the window |
-| Zoom focus with `crop` | Real; a shift under 2% of the frame between cropped and uncropped renders is unresolved |
+| Zoom focus with `crop` (focus is relative to the cropped frame, like blur) | Synthetic take, large crop: the zoom shows its target |
 
 ## Editing and export
 

@@ -92,13 +92,16 @@ def build_caption_track(words_json, width, height, duration, workdir, font_frac=
     if p.returncode != 0:
         av.die("caption render failed: " + p.stderr.strip())
     blank = items[0]["file"]
+    # "framerate 1000": an image otherwise gets a 1/25 s clock, which rounds every caption
+    # start and end to 40 ms (a frame or two off at 60 fps)
+    show = lambda png, secs: ["file '%s'" % png, "option framerate 1000", "duration %.3f" % secs]  # noqa: E731
     lines, t = ["ffconcat version 1.0"], 0.0
     for c in chunks:
         if c["start"] > t + 0.001:
-            lines += ["file '%s'" % blank, "duration %.3f" % (c["start"] - t)]
-        lines += ["file '%s'" % c["file"], "duration %.3f" % (c["end"] - c["start"])]
+            lines += show(blank, c["start"] - t)
+        lines += show(c["file"], c["end"] - c["start"])
         t = c["end"]
-    lines += ["file '%s'" % blank, "duration %.3f" % max(0.04, duration - t), "file '%s'" % blank]
+    lines += show(blank, max(0.04, duration - t)) + ["file '%s'" % blank, "option framerate 1000"]
     list_path = os.path.join(workdir, "captions.ffconcat")
     with open(list_path, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -169,6 +172,7 @@ def main():
     print("wrote %s  %dx%d@%g  %.2fs  %.1f MB  %.0f kb/s avg" % (a.out, W, H, a.fps, av.duration(a.out), size_mb, kbps))
 
     if a.gif:
+        av.ensure_parent(a.gif)
         gf = ("fps=%s,scale=%d:-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff:max_colors=128[p];"
               "[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" % (a.gif_fps, a.gif_width))
         av.run([av.FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", a.out,

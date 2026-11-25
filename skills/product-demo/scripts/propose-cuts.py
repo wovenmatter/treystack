@@ -12,8 +12,8 @@ usage: propose-cuts.py (TAKE_VIDEO | --edit edit.json) [--write]
                   at the very start or end of the take (before the demo begins, the click on
                   Stop) are always cut.
 --mode narration  take with live narration: only pauses that are BOTH silent and idle are cut,
-                  so on-screen action during a pause in speech is kept. Leading/trailing silence
-                  is cut.
+                  so on-screen action during a pause in speech is kept, also before the first
+                  and after the last word.
 --mode silence    cut every pause in speech longer than --min-silence (threshold --silence-db
                   under the peak, --pad s of air kept). Use only when the screen does not matter.
 --mode auto       (default) narration if the take has an audio track with sound, else idle.
@@ -108,8 +108,9 @@ def main():
     if a.edit:
         with open(a.edit) as f:
             edit = json.load(f)
-        if "keep" in edit:
-            av.die("the edit file uses \"keep\"; propose-cuts writes \"cut\"/\"speed\" (single take only)")
+        if "keep" in edit or len(edit["sources"]) > 1:
+            av.die("propose-cuts writes \"cut\"/\"speed\", which need a single take without \"keep\"; "
+                   "for several takes run it on each video and write \"keep\" by hand")
         p = next(iter(edit["sources"].values()))
         a.input = p if os.path.isabs(p) else os.path.join(os.path.dirname(os.path.abspath(a.edit)), p)
     if not a.input:
@@ -137,11 +138,10 @@ def main():
         gaps = [(0.0 if s <= a.pad + 0.01 else s, total if e >= total - a.pad - 0.01 else e) for s, e in gaps]
         if mode == "narration":
             fr = freezes(a.input, info, a.idle_pixels, a.min_silence)
-            gaps = [g for g in gaps if edge(*g)] + [g for g in intersect(gaps, fr) if not edge(*g)]
-            gaps = sorted(set(gaps))
+            gaps = sorted(set(intersect(gaps, fr)))
         for s, e in gaps:
             cuts.append([round(s, 3), round(e, 3)])
-            removed.append((s, e, "cut: silence" + ("" if mode == "silence" or edge(s, e) else " + idle")))
+            removed.append((s, e, "cut: silence" + ("" if mode == "silence" else " + idle")))
     else:
         for s, e in freezes(a.input, info, a.idle_pixels, a.min_idle):
             if edge(s, e):

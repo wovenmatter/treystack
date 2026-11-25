@@ -37,16 +37,21 @@ import _common as c  # noqa: E402
 from edit import Spec  # noqa: E402
 
 
-def plan(samples, W, H, dur, a, kept=None):
-    def inside(t):
-        return kept is None or any(lo <= t <= hi for lo, hi in kept)
+def plan(samples, W, H, dur, a, kept=None, box=None):
+    """Zooms for a W x H capture; box = (x, y, w, h) is the part the frame shows (the crop)."""
+    bx, by, bw, bh = box or (0, 0, W, H)
+
+    def inside(s):
+        t, px, py = s["t"], s["x"] * W, s["y"] * H
+        return (bx <= px <= bx + bw and by <= py <= by + bh
+                and (kept is None or any(lo <= t <= hi for lo, hi in kept)))
 
     # clicks outside the captured area are clamped to its edge and flagged visible=false
-    clicks = [s for s in samples if s["k"] in c.CLICK_KINDS and s["v"] and a.skip_start <= s["t"] <= dur - a.skip_end and inside(s["t"])]
+    clicks = [s for s in samples if s["k"] in c.CLICK_KINDS and s["v"] and a.skip_start <= s["t"] <= dur - a.skip_end and inside(s)]
     # never plan deeper than OpenScreen renders: it enlarges a capture at most 2x, and a narrow
     # capture is zoomed from a 2x upscaled working copy (edit.py builds it)
-    vw_min = min(W, max(a.width_frac * W, a.min_view))
-    vw_max = max(a.max_frac * W, vw_min)
+    vw_min = min(bw, max(a.width_frac * bw, a.min_view))
+    vw_max = max(a.max_frac * bw, vw_min)
     clusters = []
     for k in clicks:
         px, py = k["x"] * W, k["y"] * H
@@ -54,7 +59,7 @@ def plan(samples, W, H, dur, a, kept=None):
             cl = clusters[-1]
             nx0, nx1 = min(cl["x0"], px), max(cl["x1"], px)
             ny0, ny1 = min(cl["y0"], py), max(cl["y1"], py)
-            need_w = max(nx1 - nx0, (ny1 - ny0) * W / H) * (1 + 2 * a.margin)
+            need_w = max(nx1 - nx0, (ny1 - ny0) * bw / bh) * (1 + 2 * a.margin)
             if k["t"] - cl["t1"] <= a.gap and need_w <= vw_max:
                 cl.update(x0=nx0, x1=nx1, y0=ny0, y1=ny1, t1=k["t"], n=cl["n"] + 1)
                 continue
@@ -63,16 +68,16 @@ def plan(samples, W, H, dur, a, kept=None):
     zooms = []
     for cl in clusters:
         cx, cy = (cl["x0"] + cl["x1"]) / 2, (cl["y0"] + cl["y1"]) / 2
-        need = max(cl["x1"] - cl["x0"], (cl["y1"] - cl["y0"]) * W / H) * (1 + 2 * a.margin)
+        need = max(cl["x1"] - cl["x0"], (cl["y1"] - cl["y0"]) * bw / bh) * (1 + 2 * a.margin)
         vw = min(vw_max, max(vw_min, need))
-        vh = vw * H / W
-        cx = min(max(cx, vw / 2), W - vw / 2)
-        cy = min(max(cy, vh / 2), H - vh / 2)
+        vh = vw * bh / bw
+        cx = min(max(cx, bx + vw / 2), bx + bw - vw / 2)
+        cy = min(max(cy, by + vh / 2), by + bh - vh / 2)
         start = max(a.min_start, cl["t0"] - a.lead)
         end = cl["t1"] + a.tail
         # keep holding while the cursor stays near the cluster (dwell: typing, reading)
         # the cursor "leaves" when it exits the zoomed view (shrunk by the dwell radius)
-        rx, ry = max(0.0, vw / 2 - a.dwell_radius * W), max(0.0, vh / 2 - a.dwell_radius * W)
+        rx, ry = max(0.0, vw / 2 - a.dwell_radius * bw), max(0.0, vh / 2 - a.dwell_radius * bw)
         left_at = cl["t1"] + a.max_hold
         for s in samples:
             if s["t"] <= cl["t1"]:
@@ -83,10 +88,14 @@ def plan(samples, W, H, dur, a, kept=None):
                 left_at = s["t"]
                 break
         end = max(end, left_at)
-        # the last kept footage must leave OpenScreen about 1.2 s to zoom back out
+        end = max(min(end, cl["t1"] + a.max_hold, dur - a.skip_end), start + a.min_hold)
+        # the last kept footage must leave OpenScreen about 1.2 s to zoom back out; this limit
+        # comes last so nothing above can push the hold past it
         last = max([min(hi, dur) for lo, hi in kept if lo < dur] or [dur]) if kept else dur
-        end = min(end, cl["t1"] + a.max_hold, dur - a.skip_end, last - 1.2)
-        end = max(end, start + a.min_hold)
+        end = min(end, last - 1.2)
+        if end - start < 0.5:
+            sys.stderr.write("skipped the click(s) at %.2fs: too close to the end to zoom in and out\n" % cl["t0"])
+            continue
         zooms.append({"from": round(start, 2), "to": round(end, 2), "center": [round(cx), round(cy)],
                       "width": round(vw), "clicks": cl["n"]})
     # resolve overlaps: trim the earlier zoom so the next starts cleanly (OpenScreen pans
@@ -128,12 +137,14 @@ def main():
         S = spec.sources[src]
         video, W, H, dur = S["path"], S["width"], S["height"], S["duration"]
         kept = [(lo, hi) for name, lo, hi in spec.keep if name == src]
+        box = spec.crop_box(src)
         f = c.upscale_factor(W)
         cap = spec.cap(src, f)
         a.min_view = spec.view_size(src)[0] / cap
     elif a.video:
         spec, kept, video = None, None, a.video
         W, H, dur, _ = c.ffprobe_info(video)
+        box = (0, 0, W, H)
         f = c.upscale_factor(W)
         cap = c.max_zoom(W * f, H * f, 10)
         a.min_view = W / cap
@@ -143,7 +154,7 @@ def main():
     if not os.path.exists(tel):
         sys.exit("no telemetry: %s" % tel)
     samples = c.load_samples(tel)
-    zooms = plan(samples, W, H, dur, a, kept)
+    zooms = plan(samples, W, H, dur, a, kept, box)
     for z in zooms:
         if a.follow:
             z["follow"] = True
@@ -153,8 +164,8 @@ def main():
         W, H, dur, sum(1 for s in samples if s["k"] in c.CLICK_KINDS), len(zooms)))
     for i, z in enumerate(zooms):
         sys.stderr.write("  %d. %6.2f-%6.2fs  x%.2f  view %d px (%d%%)  centre %s  %d click(s)\n" % (
-            i + 1, z["from"], z["to"], W / z["width"], z["width"], 100 * z["width"] / W, z["center"], z["clicks"]))
-    if zooms and W * a.width_frac < a.min_view:
+            i + 1, z["from"], z["to"], box[2] / z["width"], z["width"], 100 * z["width"] / box[2], z["center"], z["clicks"]))
+    if zooms and box[2] * a.width_frac < a.min_view:
         sys.stderr.write("note: zooms on a %d px capture stop at x%.2f (OpenScreen enlarges at most 2x%s), so the"
                          " views are wider than --width-frac asks\n"
                          % (W, cap, ", even from the 2x working copy" if f > 1 else ""))
@@ -163,7 +174,8 @@ def main():
         if not a.edit:
             sys.exit("--write needs --edit")
         shutil.copyfile(a.edit, a.edit + ".bak")
-        spec.raw["zooms"] = out
+        # replace this source's zooms only; other sources keep theirs
+        spec.raw["zooms"] = [z for z in spec.raw.get("zooms") or [] if spec.src(z) != src] + out
         with open(a.edit, "w") as fh:
             json.dump(spec.raw, fh, indent=2)
         sys.stderr.write("wrote %d zoom(s) into %s\n" % (len(out), a.edit))

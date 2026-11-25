@@ -74,12 +74,17 @@ def main():
     v += ",apad,atrim=0:%.6f,asetpts=N/SR/TB,aformat=channel_layouts=stereo" % dur
     voice_chain = v + "[vc]"
     gv = av.loudness_gain_db(inputs, voice_chain, "vc", STEM_REF)
+    if gv is None:
+        av.die("the voice track is silent: was the microphone recorded? (record-start.py --mic for "
+               "narration; for a dub, check the microphone and record it again)")
 
     music_chain = None
     if a.music:
-        inputs.append(av.music_input(a.music, a.music_start))
-        music_chain = av.music_chain(len(inputs) - 1, dur, a.fade_in, a.fade_out, "mc")
+        inputs.append(av.music_input(a.music))
+        music_chain = av.music_chain(len(inputs) - 1, dur, a.fade_in, a.fade_out, "mc", a.music_start)
         gm = av.loudness_gain_db(inputs, music_chain, "mc", STEM_REF + a.music_db)
+        if gm is None:
+            av.die("the music file is silent: %s" % a.music)
 
     fg = voice_chain + ";[vc]volume=%.2fdB[vg]" % gv
     if music_chain:
@@ -89,9 +94,7 @@ def main():
                   "[vm][duck]amix=inputs=2:normalize=0:duration=first[mix]"))
     else:
         fg += ";[vg]anull[mix]"
-    meas = av.measure_loudness(inputs, fg, "mix", lufs=a.lufs, tp=a.tp)
-    fg += ";[mix]" + av.loudnorm_pass2(meas, lufs=a.lufs, tp=a.tp) + "[aout]"
-    av.mux_audio(inputs, fg, dur, a.out)
+    av.mux_audio(inputs, fg, "mix", dur, a.out, a.lufs, a.tp)
 
 
 if __name__ == "__main__":

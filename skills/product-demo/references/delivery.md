@@ -35,7 +35,7 @@ A 16:9 video in a phone feed is about 310 points wide. A 1920 px frame is then s
   deeper than 2 / (magnification at rest) without a word. At rest the capture is fitted into
   the frame minus padding (polished: 1843x1037), so a 1280 px capture stops near x1.45 and a
   2560 px one near x2.77. That would cap 14 px UI text on a 1x screen at about 4.5 pt.
-- So a capture narrower than 2400 px is zoomed from a **2x upscaled working copy**
+- So a capture narrower than 2440 px is zoomed from a **2x upscaled working copy**
   (`<take>.x2.mp4` beside the take; lanczos, libx264 CRF 10, timestamps and audio passed
   through, telemetry copied). `edit.py build` (run by `export.py`) makes it once per take and
   only when a zoom needs it; plain look never does. Measured on a 41 s 1280x752 take: 3.7 s,
@@ -51,4 +51,6 @@ A 16:9 video in a phone feed is about 310 points wide. A 1920 px frame is then s
   `frames.py DRAFT --count 12 --sheet-only`. `--text-px N --source-width W --zoom Z` prints
   the estimated on-phone size.
 - Square (1:1) or 4:5 versions get about twice the feed area: set `"aspect": "1:1"` in
-  edit.json; the view follows the cursor.
+  edit.json; the view follows the cursor. The zoom cap and the upscaled copy are only worked
+  out for 16:9, so for other shapes `edit.py summary` gives no phone verdict: check the draft
+  with `phone-preview.py`.

@@ -4,6 +4,7 @@ Imported by the sibling scripts only; not meant to be run. How the scripts drive
 and why: references/openscreen.md.
 """
 
+import bisect
 import json
 import os
 import re
@@ -29,8 +30,9 @@ DEFAULT_LRA = 20.0
 # contain-fitted into the frame minus its padding (fit = 1 - padding% x 0.4). So a 1280 px
 # capture stops near x1.45 and a 2560 px one near x2.77. A capture narrower than UPSCALE_BELOW
 # is therefore zoomed from a 2x lanczos-upscaled working copy (same timestamps, same
-# normalised telemetry): see working_copy.
-UPSCALE_BELOW = 2400
+# normalised telemetry): see working_copy. 2440 px is the narrowest 16:9 capture that reaches
+# x2.64 on its own, the depth a "phone-legible" zoom (38% of the width) needs.
+UPSCALE_BELOW = 2440
 
 
 def max_zoom(view_width, view_height=None, padding=10):
@@ -257,33 +259,59 @@ def verify_loudness(path):
 
 
 def loudness_gain_db(inputs, filtergraph, out_label, target):
+    """Gain that brings [out_label] to target LUFS, or None when it is silent."""
     i = float(measure_loudness(inputs, filtergraph, out_label)["input_i"])
-    return 0.0 if i < -70 else target - i
+    return None if i < -70 else target - i
 
 
-def music_input(path, start):
-    # -ss before -stream_loop: seek once into the song; loops restart at the song's beginning.
-    return ["-ss", "%.3f" % start, "-stream_loop", "-1", "-i", path]
+def music_input(path):
+    return ["-stream_loop", "-1", "-i", path]
 
 
-def music_chain(index, dur, fade_in, fade_out, label):
-    """Input `index` (opened with music_input) trimmed to dur, faded in and out, as [label]."""
+def music_chain(index, dur, fade_in, fade_out, label, start=0.0):
+    """Input `index` (opened with music_input) from `start` s into the song for dur s, faded in
+    and out, as [label]. The start is trimmed here, not with -ss on the input: -ss together
+    with -stream_loop makes every repeat begin mid-song. afade reads d=0 as "default length",
+    so a zero-length fade is left out."""
     fi, fo = min(fade_in, dur / 2), min(fade_out, dur / 2)
-    return ("[%d:a:0]aformat=sample_rates=48000:channel_layouts=stereo,atrim=0:%.6f,asetpts=N/SR/TB,"
-            "afade=t=in:st=0:d=%.3f,afade=t=out:st=%.6f:d=%.3f[%s]" % (index, dur, fi, dur - fo, fo, label))
+    chain = "[%d:a:0]aformat=sample_rates=48000:channel_layouts=stereo,atrim=%.6f:%.6f,asetpts=N/SR/TB" % (
+        index, start, start + dur)
+    if fi > 0:
+        chain += ",afade=t=in:st=0:d=%.3f" % fi
+    if fo > 0:
+        chain += ",afade=t=out:st=%.6f:d=%.3f" % (dur - fo, fo)
+    return chain + "[%s]" % label
 
 
-def mux_audio(inputs, filtergraph, dur, out):
-    """Write out: input 0's video copied, [aout] as AAC-LC 48 kHz stereo 192 kb/s; print its loudness."""
-    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y"]
-    for i in inputs:
-        cmd += i
-    run(cmd + ["-filter_complex", filtergraph, "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
-               "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-t", "%.6f" % dur,
-               "-movflags", "+faststart", out])
-    v = verify_loudness(out)
+def mux_audio(inputs, filtergraph, label, dur, out, lufs=DEFAULT_LUFS, tp=DEFAULT_TP):
+    """Normalise [label] to lufs (two-pass loudnorm) and write out: input 0's video copied, the
+    audio as AAC-LC 48 kHz stereo 192 kb/s. Prints the loudness measured on the written file.
+
+    AAC encoding can overshoot loudnorm's peak limit by a few tenths of a dB, so when the file
+    comes out above tp, the limit is lowered by the overshoot and it is encoded again (at most
+    twice)."""
+    limit = tp
+    for attempt in (1, 2, 3):
+        meas = measure_loudness(inputs, filtergraph, label, lufs=lufs, tp=limit)
+        if float(meas["input_i"]) < -70:  # also -inf, which loudnorm's second pass rejects
+            die("nothing to hear: the audio for %s is silent" % out)
+        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y"]
+        for i in inputs:
+            cmd += i
+        run(cmd + ["-filter_complex", "%s;[%s]%s[aout]" % (filtergraph, label, loudnorm_pass2(meas, lufs, limit)),
+                   "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
+                   "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-t", "%.6f" % dur,
+                   "-movflags", "+faststart", out])
+        v = verify_loudness(out)
+        if v["true_peak"] <= tp + 0.01 or attempt == 3:
+            break
+        limit -= v["true_peak"] - tp + 0.2
     print("wrote %s  duration=%.2fs  loudness=%.1f LUFS  true_peak=%.1f dBTP"
           % (out, duration(out), v["lufs"], v["true_peak"]))
+    if abs(v["lufs"] - lufs) > 1:
+        print("note: that is %.1f LU from the %.1f LUFS target; the peak limit forced a gentler "
+              "normalisation (common with a little speech over a music bed). Pass --lufs to compensate."
+              % (v["lufs"] - lufs, lufs))
 
 
 # ----------------------------------------------------------------------------- OpenScreen
@@ -609,14 +637,30 @@ def text_size(text, scale):
             max(0, len(lines) * (GLYPH_H + 2) * scale - 2 * scale))
 
 
+_frame_times = {}
+
+
+def frame_time(path, t):
+    """Timestamp of the frame that is on screen at t. A take is variable frame rate (a frame
+    only when the picture changes), and seeking to t itself returns the NEXT frame, which
+    during a still stretch can be seconds later."""
+    if path not in _frame_times:
+        out = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "packet=pts_time", "-of", "csv=p=0", path], capture_output=True, text=True).stdout
+        _frame_times[path] = sorted(float(x) for x in re.findall(r"^-?[0-9.]+", out, re.M))
+    times = _frame_times[path]
+    return times[max(0, bisect.bisect_right(times, t + 1e-6) - 1)] if times else t
+
+
 def grab_frame(path, t, width, height=None, crop=None):
-    """One decoded frame at t seconds as a Canvas scaled to width (crop = x, y, w, h first)."""
+    """The frame on screen at t seconds as a Canvas scaled to width (crop = x, y, w, h first)."""
+    t = max(0.0, frame_time(path, t) - 0.001)
     vf = []
     if crop:
         x, y, w, h = crop
         vf.append("crop=%d:%d:%d:%d" % (w, h, x, y))
     vf.append("scale=%d:%s:flags=lanczos" % (width, height if height else -2))
-    data = subprocess.run([FFMPEG, "-nostdin", "-v", "error", "-ss", "%.3f" % max(0.0, t), "-i", path, "-frames:v", "1",
+    data = subprocess.run([FFMPEG, "-nostdin", "-v", "error", "-ss", "%.3f" % t, "-i", path, "-frames:v", "1",
                            "-vf", ",".join(vf), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
                           capture_output=True).stdout
     if not data:

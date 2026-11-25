@@ -27,6 +27,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import Canvas, ensure_parent, ffprobe_info, grab_frame, max_zoom, upscale_factor  # noqa: E402
+from frames import parse_time  # noqa: E402
 
 
 def main():
@@ -53,7 +54,7 @@ def main():
     elif a.video and a.at:
         ffprobe_info(a.video)
         for s in a.at.split(","):
-            t = float(s)
+            t = parse_time(s)
             frames.append(("%.2fs" % t, grab_frame(a.video, t, pw)))
     else:
         ap.error("give VIDEO --at T,... or --image FILE")

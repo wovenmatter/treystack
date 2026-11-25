@@ -13,7 +13,7 @@ Never a synthetic or text-to-speech voice. Choose one mode per run.
 
 - User's own file: any format ffmpeg reads. If they want a commercial song, they supply the
   file; never download from streaming or video sites.
-- Fetched: `fetch-music.py DEMO [--source mixkit|incompetech] [--mood positive] [--list]
+- Fetched: `fetch-music.py DEMO [--source mixkit|incompetech] [--mood MOOD] [--list]
   [--pick N]` downloads one track to `DEMO/audio/music.mp3` and writes
   `DEMO/audio/music-licence.txt` (title, source page, file URL, licence, required credit, date).
   - Mixkit (default): Mixkit Stock Music Free License, social and commercial use allowed, no

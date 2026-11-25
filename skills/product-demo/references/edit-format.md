@@ -36,7 +36,7 @@ so a 1600x1000 window gives a 1600x1032 video and y coordinates include the bar.
 |---|---|
 | `sources` | name -> video path (relative to edit.json). `edit.py new` fills it. Several takes are allowed. |
 | `look` | `polished`: window on a wallpaper, padding 10, rounded corners, shadow, cursor drawn larger and smoothed, zooms. `plain`: edge to edge, black bars if the capture is not 16:9, small cursor, zooms ignored. |
-| `aspect` | `16:9` (default; gives exactly 1920x1080), `1:1`, `4:5`, `9:16` or `W:H`. Non-16:9 shapes follow the cursor. |
+| `aspect` | `16:9` (default; gives exactly 1920x1080), `1:1`, `4:5`, `9:16` or `W:H`. Non-16:9 shapes follow the cursor; `summary` gives phone verdicts for 16:9 only. |
 | `cut` | removed source ranges `[from, to]`. Single source only. |
 | `keep` | instead of `cut`: kept ranges in output order; `[from, to]` or `["take2", from, to]` to mix and reorder takes. |
 | `speed` | `{from, to, x}` source range played x times faster (0.25–16). Audio is time-stretched; avoid speeding over speech (`summary` warns). |

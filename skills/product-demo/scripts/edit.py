@@ -167,6 +167,7 @@ class Spec:
         self.style = dict(LOOKS[self.look])
         self.style.update(r.get("style") or {})
         self.keep = self._keep_ranges()
+        self._check_ranges()
 
     def src(self, item):
         name = item.get("source", self.default) if isinstance(item, dict) else self.default
@@ -181,6 +182,9 @@ class Spec:
         out = []
         if r.get("keep"):
             for k in r["keep"]:
+                if (not isinstance(k, list) or len(k) not in (2, 3)
+                        or not all(isinstance(v, (int, float)) for v in k[-2:])):
+                    die('"keep" items are [from, to] or ["source", from, to], not %s' % json.dumps(k))
                 name, a, b = k if len(k) == 3 else (self.default, k[0], k[1])
                 if name not in self.sources:
                     die("keep: unknown source %r" % name)
@@ -193,6 +197,11 @@ class Spec:
             name = self.default
             dur = self.sources[name]["duration"]
             t = 0.0
+            for k in r.get("cut") or []:
+                if not isinstance(k, list) or len(k) != 2 or not float(k[0]) < float(k[1]):
+                    die('"cut" items are [from, to] with from before to, not %s' % json.dumps(k))
+                if float(k[0]) >= dur:
+                    die('cut %s starts after the end of the take (%.3f s)' % (json.dumps(k), dur))
             for a, b in sorted((float(a), float(b)) for a, b in (r.get("cut") or [])):
                 a, b = max(0.0, a), min(dur, b)
                 if a > t:
@@ -204,6 +213,33 @@ class Spec:
             if not (0 <= a < b <= self.sources[name]["duration"] + 0.05):
                 die("range %s [%.3f, %.3f] is outside 0..%.3f or empty" % (name, a, b, self.sources[name]["duration"]))
         return [(n, a, min(b, self.sources[n]["duration"])) for n, a, b in out]
+
+    def _check_ranges(self):
+        r, seen = self.raw, []
+        for sp in r.get("speed") or []:
+            n, a, b, x = self.src(sp), float(sp["from"]), float(sp["to"]), float(sp["x"])
+            if not 0.25 <= x <= 16:
+                die('speed "x" must be between 0.25 and 16 (OpenScreen\'s range), not %g' % x)
+            if not a < b:
+                die('speed %g-%g: "from" must be before "to"' % (a, b))
+            if any(m == n and a < hi and lo < b for m, lo, hi in seen):
+                die("speed regions overlap at %g-%g; give each stretch one speed" % (a, b))
+            seen.append((n, a, b))
+        for n, box in (r.get("crop") or {}).items():
+            if n not in self.sources:
+                die('crop: unknown source %r (sources: %s)' % (n, ", ".join(self.sources)))
+            S = self.sources[n]
+            if not (isinstance(box, list) and len(box) == 4 and box[0] >= 0 and box[1] >= 0 and box[2] > 0
+                    and box[3] > 0 and box[0] + box[2] <= S["width"] and box[1] + box[3] <= S["height"]):
+                die('crop %r must be [x, y, w, h] inside the %dx%d take, not %s'
+                    % (n, S["width"], S["height"], json.dumps(box)))
+        if r.get("captions"):
+            self.src(r["captions"])
+
+    def crop_box(self, name):
+        """(x, y, w, h) in capture px of what the frame shows unzoomed: the crop, else the whole take."""
+        S = self.sources[name]
+        return tuple((self.raw.get("crop") or {}).get(name) or (0, 0, S["width"], S["height"]))
 
     def clips(self):
         """[(name, srcA, srcB, timelineA)] on the raw (pre-speed) timeline."""
@@ -232,8 +268,8 @@ class Spec:
 
     def view_size(self, name):
         """(width, height) in capture px of what the frame shows unzoomed (the crop if any)."""
-        S, crop = self.sources[name], (self.raw.get("crop") or {}).get(name)
-        return (float(crop[2]), float(crop[3])) if crop else (float(S["width"]), float(S["height"]))
+        _, _, w, h = self.crop_box(name)
+        return float(w), float(h)
 
     def cap(self, name, k=1):
         """Deepest zoom OpenScreen renders for this source, from a k-times upscaled copy."""
@@ -299,13 +335,14 @@ def build_document(spec):
     else:
         for i, z in enumerate(spec.raw.get("zooms") or []):
             n = spec.src(z)
-            S = spec.sources[n]
-            cx, cy = z.get("center", [S["width"] / 2, S["height"] / 2])
+            # OpenScreen reads a zoom's focus in the CROPPED footage, like annotations below
+            ox, oy, fw, fh = spec.crop_box(n)
+            cx, cy = z.get("center", [ox + fw / 2.0, oy + fh / 2.0])
             scale = spec.zoom_scale(z)
             depth = min(DEPTH_SCALES, key=lambda d: abs(DEPTH_SCALES[d] - scale))
             for j, (lo, hi) in enumerate(spec.map_range(n, float(z["from"]), float(z["to"]))):
                 r = {"id": "zoom-%d-%d" % (i + 1, j + 1), "startMs": ms(lo), "endMs": ms(hi), "depth": depth,
-                     "focus": {"cx": min(1, max(0, cx / S["width"])), "cy": min(1, max(0, cy / S["height"]))},
+                     "focus": {"cx": min(1, max(0, (cx - ox) / fw)), "cy": min(1, max(0, (cy - oy) / fh))},
                      "focusMode": "auto" if z.get("follow") else "manual", "source": "manual"}
                 if abs(DEPTH_SCALES[depth] - scale) > 1e-6:
                     r["customScale"] = round(scale, 2)
@@ -319,7 +356,7 @@ def build_document(spec):
         S = spec.sources[n]
         x, y, w, h = bl["box"]
         # OpenScreen places annotations in % of the CROPPED footage (verified on a real take)
-        ox, oy, fw, fh = crops.get(n, (0, 0, S["width"], S["height"]))
+        ox, oy, fw, fh = spec.crop_box(n)
         x, y = x - ox, y - oy
         for j, (lo, hi) in enumerate(spec.map_range(n, float(bl.get("from", 0)), float(bl.get("to", S["duration"])))):
             annotations.append({
@@ -358,7 +395,7 @@ def build_document(spec):
     transcripts = []
     cap = spec.raw.get("captions")
     if cap:
-        n = cap.get("source", spec.default)
+        n = spec.src(cap)
         tr = {"assetId": aid[n], "language": cap.get("language", "en"), "segments": [], "words": []}
         seg, seg_i = None, 0
         for k, w in enumerate(load_words(spec.dir, cap.get("words"))):
@@ -390,7 +427,7 @@ def summarize_spec(spec):
     L = ["Edit file: %s" % spec.path]
     for n, s in spec.sources.items():
         L.append("  source %-8s %dx%d %.1f fps %s  %s" % (n, s["width"], s["height"], s["fps"], fmt(s["duration"]), s["path"]))
-        cw, ch = (spec.raw.get("crop") or {}).get(n, (0, 0, s["width"], s["height"]))[2:]
+        cw, ch = spec.view_size(n)
         if abs(cw / float(ch) - 16 / 9.0) > 0.02 and spec.aspect == "16:9":
             L.append("   note: %s%s is %.3f:1, not 16:9; plain look will show bars (use \"crop\" or style.fill)"
                      % (n, " (cropped)" if n in (spec.raw.get("crop") or {}) else "", cw / float(ch)))
@@ -413,6 +450,8 @@ def summarize_spec(spec):
         sc = min(asked, spec.max_zoom(n)) if spec.aspect == "16:9" else asked
         frac = 1.0 / sc
         verdict = "phone-legible" if frac <= 0.38 else ("borderline" if frac <= 0.5 else "too wide for phone text")
+        if spec.aspect != "16:9":  # the cap and the upscaled copy are only worked out for 16:9
+            verdict = "depth as asked; what renders in %s is not known, check the draft" % spec.aspect
         L.append("Zoom %d: %s %s - %s  x%.2f%s  shows ~%d of %d px (%.0f%%) -> %s%s%s"
                  % (i + 1, n, fmt(z["from"]), fmt(z["to"]), sc, " (x%.2f asked)" % asked if sc < asked - 0.01 else "",
                     vw / sc, vw, frac * 100, verdict,
@@ -424,7 +463,7 @@ def summarize_spec(spec):
         if not pieces:
             L.append("   WARNING: zoom %d falls entirely in removed footage" % (i + 1))
         # 1.19, not 1.2: plan-zooms ends a zoom exactly 1.2 s before the end, rounded to 0.01 s
-        elif spec.look != "plain" and sum(b - a for _, a, b in spec.keep) - pieces[-1][1] < 1.19:
+        elif spec.zooms_on() and sum(b - a for _, a, b in spec.keep) - pieces[-1][1] < 1.19:
             L.append("   WARNING: zoom %d is still zoomed in when the video ends (zooming out takes about"
                      " 1.2 s): end it earlier or keep more footage after it" % (i + 1))
     for n in spec.sources:
@@ -434,7 +473,7 @@ def summarize_spec(spec):
     for n in sorted(capped):
         L.append("   WARNING: OpenScreen enlarges a capture at most 2x, so %s's zooms stop at x%.2f; text"
                  " will be smaller than planned" % (n, spec.max_zoom(n)))
-    if spec.look == "plain" and spec.raw.get("zooms"):
+    if spec.raw.get("zooms") and not spec.zooms_on():
         L.append("NOTE: look=plain drops the zooms")
     if spec.look == "plain":
         for n, S in spec.sources.items():
@@ -448,7 +487,7 @@ def summarize_spec(spec):
             # macOS windows have rounded bottom corners (about 13 px at 1x); edge to edge they show
             # as small black triangles. Inset the crop by that much, keeping 16:9.
             r = 13 * (2 if S["width"] >= c.UPSCALE_BELOW else 1)
-            x, y, w, h = (spec.raw.get("crop") or {}).get(n, (0, 0, S["width"], S["height"]))
+            x, y, w, h = spec.crop_box(n)
             nh = min(h, S["height"] - y - r) if y + h > S["height"] - r else h
             nw = int(round(nh * 16 / 9.0))
             if nw <= w and (y + h > S["height"] - r):
@@ -456,7 +495,8 @@ def summarize_spec(spec):
                          ' them use "crop": {"%s": [%d, %d, %d, %d]} (16:9, trims about %d px)'
                          % (n, n, x + (w - nw) // 2, y, nw, nh, r))
     for i, bl in enumerate(spec.raw.get("blur") or []):
-        L.append("Blur %d: %s %s - %s box %s" % (i + 1, spec.src(bl), fmt(bl.get("from", 0)), fmt(bl.get("to", 0)), bl["box"]))
+        L.append("Blur %d: %s %s - %s box %s" % (i + 1, spec.src(bl), fmt(bl.get("from", 0)),
+                                                 fmt(bl.get("to", spec.sources[spec.src(bl)]["duration"])), bl["box"]))
     if spec.raw.get("captions"):
         L.append("Captions: %d words" % len(words))
     d = spec.output_duration()

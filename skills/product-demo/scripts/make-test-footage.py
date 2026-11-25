@@ -196,12 +196,14 @@ def main():
     graph = [chain, tick, stamp, marker, "[d]format=yuv420p[v]"]
     # audio: 1 kHz beep 120 ms at each click, silence elsewhere
     vol = "+".join("between(t,%.3f,%.3f)" % (t, t + 0.12) for t, _, _ in clicks) or "0"
+    # every generated input gets a length (d=): endless colour sources beside finite inputs
+    # make ffmpeg stall now and then instead of finishing
     cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y",
            "-loop", "1", "-framerate", str(a.fps), "-t", str(D), "-i", base,
            "-framerate", "1", "-i", os.path.join(tmp, "ts%04d.png"),
-           "-f", "lavfi", "-i", "color=c=0xE11D48:s=%dx%d:r=%d" % (int(6 * s) or 2, int(44 * s), a.fps),
-           "-f", "lavfi", "-i", "color=c=black:s=%dx%d:r=%d" % (m, m, a.fps),
-           "-f", "lavfi", "-i", "color=c=0xFF00FF:s=%dx%d:r=%d" % (m - 2 * int(5 * s), m - 2 * int(5 * s), a.fps),
+           "-f", "lavfi", "-i", "color=c=0xE11D48:s=%dx%d:r=%d:d=%s" % (int(6 * s) or 2, int(44 * s), a.fps, D),
+           "-f", "lavfi", "-i", "color=c=black:s=%dx%d:r=%d:d=%s" % (m, m, a.fps, D),
+           "-f", "lavfi", "-i", "color=c=0xFF00FF:s=%dx%d:r=%d:d=%s" % (m - 2 * int(5 * s), m - 2 * int(5 * s), a.fps, D),
            "-f", "lavfi", "-i", "sine=f=1000:r=48000:d=%s" % D,
            "-filter_complex", ";".join(graph) + ";[5:a]volume='if(%s,0.6,0)':eval=frame[aout]" % vol,
            "-map", "[v]", "-map", "[aout]", "-t", str(D), "-r", str(a.fps),

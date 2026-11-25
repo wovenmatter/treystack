@@ -36,11 +36,8 @@ def main():
 
     dur = av.duration(a.video)
     target = a.lufs + a.volume
-    chain = av.music_chain(1, dur, a.fade_in, a.fade_out, "mus")
-    inputs = [["-i", a.video], av.music_input(a.music, a.start)]
-    meas = av.measure_loudness(inputs, chain, "mus", lufs=target, tp=a.tp)
-    fg = chain + ";[mus]" + av.loudnorm_pass2(meas, lufs=target, tp=a.tp) + "[aout]"
-    av.mux_audio(inputs, fg, dur, a.out)
+    chain = av.music_chain(1, dur, a.fade_in, a.fade_out, "mus", a.start)
+    av.mux_audio([["-i", a.video], av.music_input(a.music)], chain, "mus", dur, a.out, target, a.tp)
 
 
 if __name__ == "__main__":

@@ -97,7 +97,7 @@ coordinates), start recording as in mode A and drive with `pointer.py move`, `cl
 - Adjust `cut`, `speed`, `zooms`, `blur`, `crop`, `captions` in edit.json by hand as needed.
 - `$SKILL/scripts/edit.py summary DEMO/edit.json`: check the output length and that every
   zoom says `phone-legible` (it shows the depth that will really render), and read any WARNING
-  lines. A take narrower than 2400 px (a 1x screen) is zoomed from a 2x upscaled copy that
+  lines. A take narrower than 2440 px (a 1x screen) is zoomed from a 2x upscaled copy that
   export.py makes once beside it (`*.x2.mp4`); nothing to do.
 
 ## 8. Draft (no approval step before it)
@@ -114,7 +114,7 @@ coordinates), start recording as in mode A and drive with `pointer.py move`, `cl
 ## 9. Audio (after the cut is settled)
 
 - **Silent:** nothing to do (the final encode drops OpenScreen's silent track).
-- **Music:** the user's file, or `$SKILL/scripts/fetch-music.py DEMO [--mood positive]`, which
+- **Music:** the user's file, or `$SKILL/scripts/fetch-music.py DEMO [--mood MOOD]`, which
   fetches one royalty-free track and writes `audio/music-licence.txt`; tell the user any
   required credit. Then `add-music.py <draft> <music> DEMO/drafts/draft-N-music.mp4` (music
   alone at -14 LUFS; add `--volume -6` only if the user wants it in the background).
