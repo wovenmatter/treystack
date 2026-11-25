@@ -1,6 +1,6 @@
 # treystack
 
-The agent skills I use every day. They work in Claude Code and Codex.
+The agent skills I use every day.
 
 ## Skills
 
@@ -27,24 +27,6 @@ skills/
     scripts/      # optional helpers the skill calls
     references/   # optional detail the skill reads only when needed
 ```
-
-## Requirements
-
-**product-demo** runs on macOS and needs:
-
-```bash
-brew install --cask openscreen   # screen capture and rendering, used only through its CLI
-brew install ffmpeg              # includes ffprobe and ffplay
-brew install whisper-cpp         # optional: captions from your voice
-brew install cliclick            # optional: the agent drives the app itself
-```
-
-On first use macOS asks you to allow **Openscreen** under System Settings > Privacy & Security:
-Screen & System Audio Recording (to record a window), Accessibility (to record clicks, which
-drive the automatic zooms) and Microphone (only if you narrate while recording). Recording a
-dub over the finished cut, or letting the agent drive the pointer, needs Microphone or
-Accessibility for the app that runs your agent or terminal. Run
-`skills/product-demo/scripts/selftest.sh` to check the editing half without recording anything.
 
 ## Make them yours
 
