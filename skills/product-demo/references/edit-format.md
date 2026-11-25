@@ -55,11 +55,10 @@ so a 1600x1000 window gives a 1600x1032 video and y coordinates include the bar.
 - `plan-zooms.py --edit edit.json --write` replaces `zooms` (keeps `edit.json.bak`).
 - `edit.py summary edit.json`: timeline, output length, zoom verdicts (`phone-legible` when the
   zoom shows at most about 38% of the capture width), warnings. Each zoom shows the depth that
-  will actually render: OpenScreen never enlarges the capture past 2x, so takes narrower than
-  2400 px are zoomed from a 2x upscaled working copy (`<take>.x2.mp4`, made by `edit.py build`
-  once per take, only when a zoom needs it); coordinates in edit.json stay in take pixels.
-  It also warns when the last zoom has no time to zoom out before the end, and in the plain
-  look suggests a crop that hides a window's rounded bottom corners.
+  will actually render (the 2x cap and the upscaled working copy: `delivery.md`, Phone
+  legibility); coordinates in edit.json stay in take pixels either way. It also warns when the
+  last zoom has no time to zoom out before the end, and in the plain look suggests a crop that
+  hides a window's rounded bottom corners.
 - `edit.py` refuses unknown fields (typos) and names the nearest valid one.
 - `edit.py build edit.json` writes `edit.openscreen` (export.py does this for you).
 
@@ -67,8 +66,7 @@ so a 1600x1000 window gives a 1600x1032 video and y coordinates include the bar.
 
 `plan-zooms.py` makes each view 33% of the capture width (about x3) by default, holds from
 0.4 s before the first click to 1.2 s after the last (longer while the cursor stays near),
-and keeps the view inside the frame. Clicks outside the recorded window are ignored. For
-body text use about x3; titles read at x2–2.5. OpenScreen renders at most about x2.8 for a
-16:9 window (from the upscaled copy on a 1x screen), and the planner never plans deeper than
-what renders; it also ends each hold 1.2 s before the end of the kept footage so the zoom can
-release. See `delivery.md` for the legibility arithmetic.
+and keeps the view inside the frame. Clicks outside the recorded window are ignored. It never
+plans deeper than OpenScreen renders (about x2.8 for a 16:9 window) and ends each hold 1.2 s
+before the end of the kept footage so the zoom can release. Zoom depths for body text and
+titles, and the arithmetic: `delivery.md`, Phone legibility.

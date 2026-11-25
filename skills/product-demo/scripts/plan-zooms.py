@@ -19,10 +19,11 @@ Prints the zooms as JSON in the edit-file format (paste into "zooms", or use --w
 replace the "zooms" of an edit file), and a readable table on stderr.
 
 Usage:
-  plan-zooms.py [VIDEO_OR_TELEMETRY] [--width-frac 0.33] [--gap 2.5] [--follow]
-                [--edit edit.json [--write]] [--source NAME]
-With --edit, clicks inside cut/removed footage are dropped, source size is read from the
-edit file's source, and --write stores the result in it (a .bak copy is kept).
+  plan-zooms.py (--edit edit.json [--write] [--source NAME] | VIDEO) [--width-frac 0.33]
+                [--gap 2.5] [--follow]
+With --edit, the edit file's source is planned, clicks inside removed footage are dropped,
+and --write stores the result in it (a .bak copy is kept). A bare VIDEO is planned for the
+polished look.
 """
 
 import argparse
@@ -33,32 +34,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _common as c  # noqa: E402
-from _common import max_zoom, upscale_factor  # noqa: E402
-
-CLICKS = c.CLICK_KINDS
-
-
-def kept_ranges_from_edit(edit_path, source):
-    """Source-time ranges kept by an edit file (keep or the complement of cut)."""
-    with open(edit_path) as fh:
-        e = json.load(fh)
-    names = list(e["sources"])
-    src = source or names[0]
-    if e.get("keep"):
-        out = []
-        for k in e["keep"]:
-            name, a, b = (k if len(k) == 3 else (names[0], k[0], k[1]))
-            if name == src:
-                out.append((float(a), float(b)))
-        return e, src, out
-    cuts = sorted((float(a), float(b)) for a, b in e.get("cut") or [])
-    out, t = [], 0.0
-    for a, b in cuts:
-        if a > t:
-            out.append((t, a))
-        t = max(t, b)
-    out.append((t, 1e9))
-    return e, src, out
+from edit import Spec  # noqa: E402
 
 
 def plan(samples, W, H, dur, a, kept=None):
@@ -66,23 +42,23 @@ def plan(samples, W, H, dur, a, kept=None):
         return kept is None or any(lo <= t <= hi for lo, hi in kept)
 
     # clicks outside the captured area are clamped to its edge and flagged visible=false
-    clicks = [s for s in samples if s["k"] in CLICKS and s["v"] and a.skip_start <= s["t"] <= dur - a.skip_end and inside(s["t"])]
+    clicks = [s for s in samples if s["k"] in c.CLICK_KINDS and s["v"] and a.skip_start <= s["t"] <= dur - a.skip_end and inside(s["t"])]
     # never plan deeper than OpenScreen renders: it enlarges a capture at most 2x, and a narrow
     # capture is zoomed from a 2x upscaled working copy (edit.py builds it)
     vw_min = min(W, max(a.width_frac * W, a.min_view))
     vw_max = max(a.max_frac * W, vw_min)
     clusters = []
-    for c in clicks:
-        px, py = c["x"] * W, c["y"] * H
+    for k in clicks:
+        px, py = k["x"] * W, k["y"] * H
         if clusters:
             cl = clusters[-1]
             nx0, nx1 = min(cl["x0"], px), max(cl["x1"], px)
             ny0, ny1 = min(cl["y0"], py), max(cl["y1"], py)
             need_w = max(nx1 - nx0, (ny1 - ny0) * W / H) * (1 + 2 * a.margin)
-            if c["t"] - cl["t1"] <= a.gap and need_w <= vw_max:
-                cl.update(x0=nx0, x1=nx1, y0=ny0, y1=ny1, t1=c["t"], n=cl["n"] + 1)
+            if k["t"] - cl["t1"] <= a.gap and need_w <= vw_max:
+                cl.update(x0=nx0, x1=nx1, y0=ny0, y1=ny1, t1=k["t"], n=cl["n"] + 1)
                 continue
-        clusters.append({"t0": c["t"], "t1": c["t"], "x0": px, "x1": px, "y0": py, "y1": py, "n": 1})
+        clusters.append({"t0": k["t"], "t1": k["t"], "x0": px, "x1": px, "y0": py, "y1": py, "n": 1})
 
     zooms = []
     for cl in clusters:
@@ -123,9 +99,7 @@ def plan(samples, W, H, dur, a, kept=None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("input", nargs="?", help="video (telemetry at <video>.cursor.json) or a telemetry .json; optional with --edit")
-    ap.add_argument("--video", help="video for size/duration when input is telemetry")
-    ap.add_argument("--size", help="WxH when no video is available")
+    ap.add_argument("video", nargs="?", help="video with telemetry at <video>.cursor.json (instead of --edit)")
     ap.add_argument("--width-frac", type=float, default=0.33, help="view width as share of capture width (default 0.33)")
     ap.add_argument("--max-frac", type=float, default=0.6, help="widest view a cluster may need (default 0.6)")
     ap.add_argument("--margin", type=float, default=0.12, help="margin around a cluster, share of its size")
@@ -139,53 +113,44 @@ def main():
     ap.add_argument("--skip-start", type=float, default=0.5)
     ap.add_argument("--skip-end", type=float, default=1.0)
     ap.add_argument("--follow", action="store_true", help="mark zooms to follow the cursor (focusMode auto)")
-    ap.add_argument("--edit", help="edit file: drop clicks in removed footage, use its source")
+    ap.add_argument("--edit", help="edit file: plan its source, drop clicks in removed footage")
     ap.add_argument("--source", help="source name in the edit file (default: first)")
     ap.add_argument("--write", action="store_true", help="replace the edit file's zooms with the plan")
     a = ap.parse_args()
 
-    kept, edit, src = None, None, None
-    video = a.video
+    # deepest zoom that renders: the unzoomed view is the crop if any; narrow captures zoom
+    # from edit.py's 2x working copy; padding comes from the look (polished 10 by default)
     if a.edit:
-        edit, src, kept = kept_ranges_from_edit(a.edit, a.source)
-        if not video:
-            p = edit["sources"][src]
-            video = p if os.path.isabs(p) else os.path.join(os.path.dirname(os.path.abspath(a.edit)), p)
-    if not a.input:
-        if not video:
-            sys.exit("give a video/telemetry file or --edit")
-        a.input = video
-    if a.input.endswith(".json"):
-        tel = a.input
+        spec = Spec(a.edit)
+        src = a.source or spec.default
+        if src not in spec.sources:
+            sys.exit("no source %r in %s" % (src, a.edit))
+        S = spec.sources[src]
+        video, W, H, dur = S["path"], S["width"], S["height"], S["duration"]
+        kept = [(lo, hi) for name, lo, hi in spec.keep if name == src]
+        f = c.upscale_factor(W)
+        cap = spec.cap(src, f)
+        a.min_view = spec.view_size(src)[0] / cap
+    elif a.video:
+        spec, kept, video = None, None, a.video
+        W, H, dur, _ = c.ffprobe_info(video)
+        f = c.upscale_factor(W)
+        cap = c.max_zoom(W * f, H * f, 10)
+        a.min_view = W / cap
     else:
-        tel = a.input + ".cursor.json"
-        video = video or a.input
+        sys.exit("give --edit edit.json or a VIDEO")
+    tel = video + ".cursor.json"
     if not os.path.exists(tel):
         sys.exit("no telemetry: %s" % tel)
     samples = c.load_samples(tel)
-    if video:
-        W, H, dur, _ = c.ffprobe_info(video)
-    elif a.size:
-        W, H = (int(v) for v in a.size.lower().split("x"))
-        dur = samples[-1]["t"] if samples else 0
-    else:
-        sys.exit("need --video or --size to know the capture size")
-    # deepest zoom that renders: the unzoomed view is the crop if any; narrow captures zoom
-    # from edit.py's 2x working copy; padding comes from the look (polished 10 by default)
-    crop = ((edit or {}).get("crop") or {}).get(src) if edit else None
-    VW, VH = (float(crop[2]), float(crop[3])) if crop else (float(W), float(H))
-    pad = ((edit or {}).get("style") or {}).get("padding", 0 if (edit or {}).get("look") == "plain" else 10)
-    f = upscale_factor(W)
-    cap = max_zoom(VW * f, VH * f, pad)
-    a.min_view = VW / cap
     zooms = plan(samples, W, H, dur, a, kept)
     for z in zooms:
         if a.follow:
             z["follow"] = True
-        if src and edit and len(edit["sources"]) > 1:
+        if spec and len(spec.sources) > 1:
             z["source"] = src
     sys.stderr.write("capture %dx%d, %.1fs, %d clicks -> %d zoom(s)\n" % (
-        W, H, dur, sum(1 for s in samples if s["k"] in CLICKS), len(zooms)))
+        W, H, dur, sum(1 for s in samples if s["k"] in c.CLICK_KINDS), len(zooms)))
     for i, z in enumerate(zooms):
         sys.stderr.write("  %d. %6.2f-%6.2fs  x%.2f  view %d px (%d%%)  centre %s  %d click(s)\n" % (
             i + 1, z["from"], z["to"], W / z["width"], z["width"], 100 * z["width"] / W, z["center"], z["clicks"]))
@@ -198,9 +163,9 @@ def main():
         if not a.edit:
             sys.exit("--write needs --edit")
         shutil.copyfile(a.edit, a.edit + ".bak")
-        edit["zooms"] = out
+        spec.raw["zooms"] = out
         with open(a.edit, "w") as fh:
-            json.dump(edit, fh, indent=2)
+            json.dump(spec.raw, fh, indent=2)
         sys.stderr.write("wrote %d zoom(s) into %s\n" % (len(out), a.edit))
     print(json.dumps(out, indent=1))
 

@@ -20,12 +20,11 @@ Usage examples:
 """
 
 import argparse
-import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import Canvas, ffprobe_info, grab_frame, text_size  # noqa: E402
+from _common import CLICK_KINDS, Canvas, ffprobe_info, grab_frame, load_samples  # noqa: E402
 
 
 def parse_time(s):
@@ -43,22 +42,16 @@ def fmt_time(t):
     return "%d:%04.1f" % (int(t // 60), t % 60)
 
 
-def load_clicks(path):
-    with open(path) as fh:
-        data = json.load(fh)
-    samples = data if isinstance(data, list) else data.get("samples", [])
-    out = []
-    for s in samples:
-        kind = s.get("interactionType", "move")
-        if kind in ("click", "double-click", "right-click", "middle-click"):
-            out.append((s["timeMs"] / 1000.0, s.get("cx"), s.get("cy"), kind))
-    return out
-
-
 def label(canvas, text, scale):
-    tw, th = text_size(text, scale)
     pad = scale * 2
     canvas.text(pad * 2, pad * 2, text, scale=scale, color=(255, 255, 0), bg=(0, 0, 0), pad=pad)
+
+
+def mark(img, xy, thickness):
+    """Red box around a click position (xy in 0..1 of the frame)."""
+    bx, by = int(xy[0] * img.w), int(xy[1] * img.h)
+    r = max(6, img.w // 60)
+    img.frame(bx - r, by - r, 2 * r, 2 * r, (255, 0, 0), t=thickness)
 
 
 def main():
@@ -105,8 +98,9 @@ def main():
         tel = a.telemetry or a.video + ".cursor.json"
         if not os.path.exists(tel):
             sys.exit("no telemetry at %s (pass --telemetry)" % tel)
-        for t, cx, cy, kind in load_clicks(tel):
-            items.append((t + a.offset, kind.upper(), (cx, cy)))
+        for s in load_samples(tel):
+            if s["k"] in CLICK_KINDS:
+                items.append((s["t"] + a.offset, s["k"].upper(), (s["x"], s["y"])))
     if not items:
         items = [(a.start + (last - a.start) * (i + 0.5) / 12, "", None) for i in range(12)]
     items = sorted({(round(min(max(t, 0.0), last), 3), n, xy) for t, n, xy in items}, key=lambda x: x[0])
@@ -117,10 +111,8 @@ def main():
     for t, note, xy in items:
         need_w = a.width if not a.sheet_only else a.thumb
         img = grab_frame(a.video, t, need_w)
-        if a.mark and xy and xy[0] is not None:
-            bx, by = int(xy[0] * img.w), int(xy[1] * img.h)
-            r = max(6, img.w // 60)
-            img.frame(bx - r, by - r, 2 * r, 2 * r, (255, 0, 0), t=max(2, img.w // 400))
+        if a.mark and xy:
+            mark(img, xy, max(2, img.w // 400))
         text = fmt_time(t) + ("  " + note if note else "")
         if not a.sheet_only:
             single = Canvas.from_rgb(img.w, img.h, img.buf)
@@ -131,10 +123,8 @@ def main():
             written.append(p)
         if a.sheet or a.sheet_only:
             th = img if img.w == a.thumb else grab_frame(a.video, t, a.thumb)
-            if a.mark and xy and xy[0] is not None and th is not img:
-                bx, by = int(xy[0] * th.w), int(xy[1] * th.h)
-                r = max(6, th.w // 60)
-                th.frame(bx - r, by - r, 2 * r, 2 * r, (255, 0, 0), t=2)
+            if a.mark and xy and th is not img:
+                mark(th, xy, 2)
             if not a.no_label:
                 label(th, text, max(2, th.w // 240))
             thumbs.append(th)

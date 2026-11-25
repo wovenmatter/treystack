@@ -23,18 +23,10 @@ and up is comfortable. Anti-aliased real UI fonts need the upper end. Always loo
 
 import argparse
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import Canvas, ensure_parent, ffprobe_info, grab_frame, max_zoom, upscale_factor  # noqa: E402
-
-
-def load_image(path, width):
-    out = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", path, "-vf", "scale=%d:-2:flags=lanczos" % width,
-                          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
-    h = len(out) // (width * 3)
-    return Canvas.from_rgb(width, h, out[: width * h * 3])
 
 
 def main():
@@ -51,14 +43,13 @@ def main():
     ap.add_argument("--frame-share", type=float, default=1.0,
                     help="share of the output width the recording occupies when not zoomed (padding), e.g. 0.9")
     a = ap.parse_args()
-    if a.out:
-        ensure_parent(a.out)
+    ensure_parent(a.out)
 
     pw = int(round(a.width_pt * a.density))
     frames = []
     if a.image:
         for p in a.image:
-            frames.append((os.path.basename(p), load_image(p, pw)))
+            frames.append((os.path.basename(p), grab_frame(p, 0, pw)))
     elif a.video and a.at:
         ffprobe_info(a.video)
         for s in a.at.split(","):

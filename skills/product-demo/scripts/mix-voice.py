@@ -54,7 +54,7 @@ def main():
     dur = av.duration(a.video)
     inputs = [["-i", a.video]]
     if a.voice == "-":
-        if not av.has_stream(a.video, "audio"):
+        if not av.media_info(a.video)["audio_tracks"]:
             av.die("VOICE is '-' but the video has no audio track")
         vsrc = "0:a:0"
     else:
@@ -77,12 +77,8 @@ def main():
 
     music_chain = None
     if a.music:
-        inputs.append(["-ss", "%.3f" % a.music_start, "-stream_loop", "-1", "-i", a.music])
-        mi = len(inputs) - 1
-        fo, fi = min(a.fade_out, dur / 2), min(a.fade_in, dur / 2)
-        music_chain = ("[%d:a:0]aformat=sample_rates=48000:channel_layouts=stereo,atrim=0:%.6f,"
-                       "asetpts=N/SR/TB,afade=t=in:st=0:d=%.3f,afade=t=out:st=%.6f:d=%.3f[mc]"
-                       % (mi, dur, fi, dur - fo, fo))
+        inputs.append(av.music_input(a.music, a.music_start))
+        music_chain = av.music_chain(len(inputs) - 1, dur, a.fade_in, a.fade_out, "mc")
         gm = av.loudness_gain_db(inputs, music_chain, "mc", STEM_REF + a.music_db)
 
     fg = voice_chain + ";[vc]volume=%.2fdB[vg]" % gv
@@ -95,17 +91,7 @@ def main():
         fg += ";[vg]anull[mix]"
     meas = av.measure_loudness(inputs, fg, "mix", lufs=a.lufs, tp=a.tp)
     fg += ";[mix]" + av.loudnorm_pass2(meas, lufs=a.lufs, tp=a.tp) + "[aout]"
-
-    cmd = [av.FFMPEG, "-hide_banner", "-loglevel", "error", "-y"]
-    for i in inputs:
-        cmd += i
-    cmd += ["-filter_complex", fg, "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-t", "%.6f" % dur,
-            "-movflags", "+faststart", a.out]
-    av.run(cmd)
-    r = av.verify_loudness(a.out)
-    print("wrote %s  duration=%.2fs  loudness=%.1f LUFS  true_peak=%.1f dBTP"
-          % (a.out, av.duration(a.out), r["lufs"], r["true_peak"]))
+    av.mux_audio(inputs, fg, dur, a.out)
 
 
 if __name__ == "__main__":

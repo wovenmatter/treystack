@@ -5,7 +5,7 @@ usage: encode-final.py INPUT OUT.mp4 [--width 1920] [--height 1080] [--fps 30|60
                        [--crf 18] [--maxrate 12M] [--bufsize 24M] [--preset slow]
                        [--audio-bitrate 192k] [--no-audio]
                        [--captions WORDS.json]
-                       [--gif OUT.gif] [--gif-width 720] [--gif-fps 15] [--max-mb N]
+                       [--gif OUT.gif] [--max-mb N]
 
 Video: H.264 High profile, yuv420p, BT.709 tagged, capped CRF (quality-targeted but never above
 --maxrate), keyframe every 2 s with closed GOPs, constant frame rate --fps, scaled to fit --width x --height and
@@ -17,14 +17,13 @@ audio track that is digital silence (max level below -80 dBFS), or --no-audio.
             dub) in this same encode: 2-5 words at a time, bold white on a dark box, 7.8% of the
             frame height, rendered by macOS AppKit (osascript), since Homebrew ffmpeg has no
             drawtext/libass. For live narration put captions in edit.json instead.
---gif       also write an animated GIF preview (palette-optimised); cheap but large files.
+--gif       also write an animated GIF preview (720 px, 15 fps, palette-optimised); large files.
 --max-mb    after encoding, warn (exit 3) if the file is larger than this many MB.
 Platform limits (max size, bitrate, length, fps) change: pass them as parameters.
 """
 import argparse
 import json
 import os
-import subprocess
 import shutil
 import sys
 import tempfile
@@ -87,13 +86,9 @@ def build_caption_track(words_json, width, height, duration, workdir, font_frac=
         items.append({"text": c["text"], "file": c["file"]})
     spec = {"width": width, "height": height, "font_px": round(height * font_frac),
             "bottom_px": round(height * bottom_frac), "max_width_frac": 0.86, "items": items}
-    spec_path = os.path.join(workdir, "spec.json")
-    with open(spec_path, "w") as f:
-        json.dump(spec, f)
     if shutil.which("osascript") is None:
         av.die("osascript not found: caption rendering needs macOS (JXA/AppKit)")
-    p = subprocess.run(["osascript", "-l", "JavaScript", os.path.join(av.HERE, "render-caption-pngs.js"),
-                        spec_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    p = av.render_text_pngs(spec, os.path.join(workdir, "spec.json"))
     if p.returncode != 0:
         av.die("caption render failed: " + p.stderr.strip())
     blank = items[0]["file"]
@@ -110,11 +105,6 @@ def build_caption_track(words_json, width, height, duration, workdir, font_frac=
     return list_path, chunks
 
 
-def is_digital_silence(path):
-    db = av.max_volume_db(path)
-    return db is None or db < -80
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input"); ap.add_argument("out")
@@ -129,20 +119,18 @@ def main():
     ap.add_argument("--no-audio", action="store_true")
     ap.add_argument("--captions")
     ap.add_argument("--gif")
-    ap.add_argument("--gif-width", type=int, default=720)
-    ap.add_argument("--gif-fps", type=float, default=15)
     ap.add_argument("--max-mb", type=float)
     a = ap.parse_args()
     av.ensure_parent(a.out)
     av.need(av.FFMPEG, av.FFPROBE)
 
-    maxrate, bufsize = a.maxrate, a.bufsize
     W, H = a.width, a.height
-    info = av.probe(a.input)
-    astreams = [s for s in info["streams"] if s["codec_type"] == "audio"]
-    dur = av.duration(a.input)
-    if astreams and (a.no_audio or is_digital_silence(a.input)):
-        astreams = []
+    info = av.media_info(a.input)
+    dur, audio = info["duration"], info["audio"]
+    # silent videos carry no audio track (see the header)
+    db = av.max_volume_db(a.input) if audio and not a.no_audio else None
+    if db is None or db < -80:
+        audio = None
 
     vf = ("[0:v:0]scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos:out_color_matrix=bt709,"
           "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=%s" % (W, H, W, H, a.fps))
@@ -157,15 +145,14 @@ def main():
 
     cmd = [av.FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-stats", "-y"] + inputs + [
         "-filter_complex", vf, "-map", "[v]",
-        "-c:v", "libx264", "-preset", a.preset, "-crf", str(a.crf), "-maxrate", maxrate,
-        "-bufsize", bufsize, "-profile:v", "high", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", a.preset, "-crf", str(a.crf), "-maxrate", a.maxrate,
+        "-bufsize", a.bufsize, "-profile:v", "high", "-pix_fmt", "yuv420p",
         "-g", str(int(round(a.fps * 2))), "-flags", "+cgop", "-keyint_min", str(int(round(a.fps))), "-sc_threshold", "0",
         "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
         "-r", "%s" % a.fps]
-    if astreams:
-        s = astreams[0]
+    if audio:
         cmd += ["-map", "0:a:0"]
-        if s.get("codec_name") == "aac" and s.get("sample_rate") == "48000" and s.get("channels") == 2:
+        if audio["codec"] == "aac" and audio["sample_rate"] == "48000" and audio["channels"] == 2:
             cmd += ["-c:a", "copy"]
         else:
             cmd += ["-c:a", "aac", "-b:a", a.audio_bitrate, "-ar", "48000", "-ac", "2"]
@@ -180,8 +167,8 @@ def main():
     print("wrote %s  %dx%d@%g  %.2fs  %.1f MB  %.0f kb/s avg" % (a.out, W, H, a.fps, av.duration(a.out), size_mb, kbps))
 
     if a.gif:
-        gf = ("fps=%s,scale=%d:-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff:max_colors=128[p];"
-              "[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" % (a.gif_fps, a.gif_width))
+        gf = ("fps=15,scale=720:-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff:max_colors=128[p];"
+              "[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle")
         av.run([av.FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", a.out,
                  "-vf", gf, "-loop", "0", a.gif])
         print("wrote %s  %.1f MB" % (a.gif, os.path.getsize(a.gif) / 1e6))

@@ -22,7 +22,6 @@ Times are seconds from the start of INPUT. Punctuation stays attached to its wor
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -34,10 +33,6 @@ import _common as av  # noqa: E402
 
 DTW_LAG = 0.10
 HF = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-%s.bin"
-
-
-def models_dir(arg):
-    return arg or os.environ.get("WHISPER_MODELS_DIR") or os.path.expanduser("~/.cache/whisper.cpp")
 
 
 def ensure_model(name, mdir, download):
@@ -57,20 +52,14 @@ def ensure_model(name, mdir, download):
 
 def speech_regions(wav):
     """Non-silent intervals [(start, end)] using a threshold 35 dB under the clip's peak."""
-    p = av.run([av.FFMPEG, "-nostdin", "-hide_banner", "-i", wav, "-af", "volumedetect",
-                 "-f", "null", "-"])
-    m = re.search(r"max_volume: (-?[0-9.]+) dB", p.stderr)
-    thr = max(-60.0, (float(m.group(1)) if m else 0.0) - 35.0)
-    p = av.run([av.FFMPEG, "-nostdin", "-hide_banner", "-i", wav, "-af",
-                 "silencedetect=n=%.1fdB:d=0.20" % thr, "-f", "null", "-"])
+    peak = av.max_volume_db(wav)
+    thr = max(-60.0, (peak if peak is not None else 0.0) - 35.0)
     total = av.duration(wav)
-    starts = [float(x) for x in re.findall(r"silence_start: (-?[0-9.]+)", p.stderr)]
-    ends = [float(x) for x in re.findall(r"silence_end: ([0-9.]+)", p.stderr)]
     regions, cur = [], 0.0
-    for i, s0 in enumerate(starts):
+    for s0, e0 in av.silence_ranges(wav, thr, 0.20):
         if s0 > cur + 0.02:
             regions.append((cur, s0))
-        cur = ends[i] if i < len(ends) else total
+        cur = e0
     if cur < total - 0.02:
         regions.append((cur, total))
     return regions
@@ -121,7 +110,8 @@ def main():
     cli = shutil.which("whisper-cli")
     if not cli:
         av.die("whisper-cli not found (brew install whisper-cpp)", 127)
-    model = ensure_model(a.model, models_dir(a.models_dir), a.download)
+    mdir = a.models_dir or os.environ.get("WHISPER_MODELS_DIR") or os.path.expanduser("~/.cache/whisper.cpp")
+    model = ensure_model(a.model, mdir, a.download)
 
     with tempfile.TemporaryDirectory() as td:
         wav = os.path.join(td, "in.wav")

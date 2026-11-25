@@ -11,6 +11,7 @@ Exit 0 while recording or waiting, 1 otherwise. Reads files and `ps` only.
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _common as c  # noqa: E402
@@ -20,11 +21,7 @@ def main(argv):
     if "-h" in argv or "--help" in argv or not argv:
         print(__doc__.strip())
         return 0 if argv else 1
-    demo = os.path.abspath(os.path.expanduser(argv[0]))
-    try:
-        st = json.load(open(os.path.join(demo, ".recording.json")))
-    except (OSError, ValueError):
-        st = None
+    st = c.load_state(os.path.abspath(os.path.expanduser(argv[0])))
     res = {"status": "idle"}
     if st:
         alive = bool(c.recorders(st.get("app") or c.require_app(), st["marker"]))
@@ -35,7 +32,7 @@ def main(argv):
         t0 = st.get("startedAt") or st.get("launchedAt")
         res = {"status": status, "pid": st.get("pid"), "take": st.get("take"),
                "source": st.get("sourceName") or st.get("source"),
-               "elapsedSec": round(c.now() - t0, 1) if t0 and alive else None}
+               "elapsedSec": round(time.time() - t0, 1) if t0 and alive else None}
         if done is not None:
             res["durationMs"] = done.get("durationMs")
     if "--json" in argv:

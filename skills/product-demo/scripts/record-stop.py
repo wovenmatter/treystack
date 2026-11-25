@@ -24,8 +24,6 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _common as c  # noqa: E402
 
-STATE = ".recording.json"
-
 
 def signal_pid(pid, sig):
     try:
@@ -66,9 +64,7 @@ def telemetry_stats(path):
         s = c.load_samples(path)
     except (OSError, ValueError, KeyError):
         return None
-    if len(s) < 2:
-        return {"samples": len(s), "hz": 0, "clicks": 0, "visible": sum(1 for x in s if x["v"])}
-    span = s[-1]["t"] - s[0]["t"]
+    span = s[-1]["t"] - s[0]["t"] if len(s) > 1 else 0
     return {"samples": len(s), "hz": round((len(s) - 1) / span, 1) if span > 0 else 0,
             "clicks": sum(1 for x in s if x["k"] in c.CLICK_KINDS),
             "visible": sum(1 for x in s if x["v"])}
@@ -81,9 +77,8 @@ def main(argv):
     demo = os.path.abspath(os.path.expanduser(argv[0]))
     timeout = float(argv[argv.index("--timeout") + 1]) if "--timeout" in argv else 60.0
     keep, force = "--keep-originals" in argv, "--kill" in argv
-    try:
-        st = json.load(open(os.path.join(demo, STATE)))
-    except (OSError, ValueError):
+    st = c.load_state(demo)
+    if st is None:
         if not os.path.isdir(demo):
             c.die("no such demo folder: %s" % demo, 1, True)
         res = {"ok": True, "status": "nothing-running", "note": "no recording was started from " + demo}
@@ -137,7 +132,7 @@ def main(argv):
         except RuntimeError:
             info = None
         if not info:
-            os.replace(os.path.join(demo, STATE), os.path.join(take_dir, "take.json"))
+            os.replace(os.path.join(demo, c.STATE), os.path.join(take_dir, "take.json"))
             err = (done or {}).get("error") or "recorder exited without a done event"
             print(json.dumps({"ok": False, "status": "failed", "error": c.explain_error(err),
                               "takeDir": take_dir, "stderrLog": err_log, "warnings": warnings}))
@@ -159,7 +154,7 @@ def main(argv):
         copy_and_rewrite(project, video, cursor, take_dir)
 
     new_video = os.path.join(take_dir, os.path.basename(video))
-    new_cursor = c.telemetry_path(new_video)
+    new_cursor = new_video + ".cursor.json"
     if not os.path.exists(new_cursor):
         new_cursor = None
     try:
@@ -186,10 +181,10 @@ def main(argv):
         elif tel["samples"] > 50 and not tel["clicks"]:
             warnings.append("no clicks in the telemetry; if there were clicks: " + c.ACCESSIBILITY_MSG)
 
-    st.update(status="collected", stoppedAt=c.now(), how=how)
+    st.update(status="collected", stoppedAt=time.time(), how=how)
     with open(os.path.join(take_dir, "take.json"), "w") as f:
         json.dump(st, f, indent=2)
-    os.remove(os.path.join(demo, STATE))
+    os.remove(os.path.join(demo, c.STATE))
     vi = {k: info[k] for k in ("width", "height", "fps", "duration", "audio_tracks")} if info else None
     print(json.dumps({"ok": True, "status": status, "take": st["take"], "takeDir": take_dir,
                       "project": project, "video": new_video, "cursor": new_cursor,

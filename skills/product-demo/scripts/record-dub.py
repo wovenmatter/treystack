@@ -2,7 +2,7 @@
 """Play a (silent) cut for the user and record the microphone over it, in sync. macOS only.
 
 usage: record-dub.py VIDEO VOICE_OUT.wav [--device :default] [--countdown 3]
-                     [--player-width 1280] [--extra-offset-ms 0] [--mix OUT.mp4 [mix-voice args...]]
+                     [--player-width 1280] [--extra-offset-ms 0]
 
 1. Starts microphone capture first (ffmpeg avfoundation, device ":default" or e.g. ":1"; list
    devices with: ffmpeg -f avfoundation -list_devices true -i "").
@@ -14,7 +14,7 @@ usage: record-dub.py VIDEO VOICE_OUT.wav [--device :default] [--countdown 3]
    capture offset of video time 0 is measured on every run, not assumed. Display lag of ~2
    frames is added; --extra-offset-ms adjusts further (+ = voice later).
 4. Writes VOICE_OUT.wav (48 kHz mono, exactly the video's length, aligned to video t=0) and
-   VOICE_OUT.sync.json with the measured numbers. With --mix, then runs mix-voice.py.
+   VOICE_OUT.sync.json with the measured numbers. Then lay it on the cut with mix-voice.py.
 Needs: ffmpeg, ffplay, osascript (countdown digits), microphone permission for the app that
 runs this shell (macOS asks once; System Settings > Privacy & Security > Microphone).
 """
@@ -33,7 +33,6 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _common as av  # noqa: E402
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 CLK = time.CLOCK_UPTIME_RAW  # same clock as CoreMedia host time / avfoundation timestamps
 
 
@@ -43,21 +42,17 @@ def now():
 
 def build_playback(video, out, countdown, width, td):
     """Muted copy with N-second countdown (big digits on a frozen first frame)."""
-    info = av.probe(video)
-    vs = [s for s in info["streams"] if s["codec_type"] == "video"][0]
-    W = width; H = int(round(W * int(vs["height"]) / int(vs["width"]) / 2) * 2)
-    fps = av.video_fps(video)
+    info = av.media_info(video)
+    W = width
+    H = int(round(W * info["height"] / info["width"] / 2) * 2)
+    fps = info["fps"] or 30.0
     inputs = ["-i", video]
     fg = "[0:v:0]scale=%d:%d,fps=%g,tpad=start_duration=%g:start_mode=clone,format=yuv420p" % (W, H, fps, countdown)
     if countdown > 0 and shutil.which("osascript"):
         items = [{"text": str(countdown - i), "file": os.path.join(td, "cd%d.png" % i)} for i in range(int(countdown))]
         spec = {"width": W, "height": H, "font_px": int(H * 0.30), "bottom_px": int(H * 0.30),
                 "box_alpha": 0.55, "items": items}
-        with open(os.path.join(td, "cd.json"), "w") as f:
-            json.dump(spec, f)
-        r = subprocess.run(["osascript", "-l", "JavaScript", os.path.join(HERE, "render-caption-pngs.js"),
-                            os.path.join(td, "cd.json")], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if r.returncode == 0:
+        if av.render_text_pngs(spec, os.path.join(td, "cd.json")).returncode == 0:
             fg += "[b0]"
             for i, it in enumerate(items):
                 inputs += ["-loop", "1", "-t", "1", "-i", it["file"]]
@@ -79,8 +74,6 @@ def main():
     ap.add_argument("--extra-offset-ms", type=float, default=0.0)
     ap.add_argument("--open-timeout", type=float, default=12.0)
     ap.add_argument("--test-beep-at", type=float, help=argparse.SUPPRESS)  # test aid: afplay a beep at video time S
-    ap.add_argument("--mix", nargs=argparse.REMAINDER,
-                    help="OUT.mp4 [extra mix-voice.py args]: lay the voice on VIDEO afterwards")
     a = ap.parse_args()
     av.ensure_parent(a.voice_out)
     av.need(av.FFMPEG, av.FFPROBE, "ffplay")
@@ -152,10 +145,9 @@ def main():
         av.run([av.FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", raw, "-af",
                  "atrim=start=%.6f,asetpts=N/SR/TB,apad,atrim=0:%.6f" % (offset, dur),
                  "-ar", "48000", "-ac", "1", "-c:a", "pcm_s24le", a.voice_out])
-        lvl = av.run([av.FFMPEG, "-nostdin", "-hide_banner", "-i", a.voice_out, "-af", "volumedetect",
-                       "-f", "null", "-"]).stderr
-        mx = re.search(r"max_volume: (-?[0-9.inf]+) dB", lvl)
-        maxdb = float(mx.group(1)) if mx and mx.group(1) != "-inf" else -999.0
+        maxdb = av.max_volume_db(a.voice_out)
+        if maxdb is None or maxdb == float("-inf"):
+            maxdb = -999.0
         jitter = statistics.pstdev(steady) if len(steady) > 2 else 0.0
         sync = {"capture_start_host": cap_start[0], "video_t0_host": content0_host,
                 "offset_into_capture_s": round(offset, 4), "frame_clock_jitter_s": round(jitter, 4),
@@ -171,9 +163,6 @@ def main():
             sys.exit(5)
         elif maxdb < -45:
             sys.stderr.write("warning: the recording is very quiet (max %.1f dBFS): wrong input device?\n" % maxdb)
-        if a.mix:
-            subprocess.check_call([sys.executable, os.path.join(HERE, "mix-voice.py"), a.video,
-                                   a.voice_out] + a.mix)
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
